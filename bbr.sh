@@ -1,5 +1,26 @@
 #!/bin/bash
 
+# 修改 /etc/resolv.conf 配置
+chattr -i /etc/resolv.conf
+cat > /etc/resolv.conf <<EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
+chattr +i /etc/resolv.conf
+
+# 更新包列表
+apt-get update
+
+# 安裝必要的軟件包
+apt-get install -y curl wget sudo
+
+# 安裝 Docker
+curl -fsSL https://get.docker.com | bash -s docker
+
+# 更新 sysctl 設置
+sysctl -w net.core.rmem_max=26214400
+sysctl -w net.core.rmem_default=26214400
+
 # 启用 BBR
 echo "启用 BBR..."
 echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
