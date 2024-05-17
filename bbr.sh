@@ -31,19 +31,6 @@ else
     echo "BBR 启用失败"
 fi
 
-# 启用 FQ
-echo "启用 FQ..."
-echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-sysctl -p
-
-# 检查 FQ 是否成功启用
-echo "验证 FQ..."
-if sysctl net.core.default_qdisc | grep -q "fq"; then
-    echo "FQ 已成功启用"
-else
-    echo "FQ 启用失败"
-fi
-
 # 启用 ECN
 echo "启用 ECN..."
 echo "net.ipv4.tcp_ecn=1" >> /etc/sysctl.conf
