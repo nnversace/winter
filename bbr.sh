@@ -17,10 +17,6 @@ apt-get install -y curl wget sudo
 # 安裝 Docker
 curl -fsSL https://get.docker.com | bash -s docker
 
-# 更新 sysctl 設置
-sysctl -w net.core.rmem_max=26214400
-sysctl -w net.core.rmem_default=26214400
-
 # 启用 BBR
 echo "启用 BBR..."
 echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
