@@ -1,60 +1,111 @@
 #!/bin/bash
 
-# 修改 /etc/resolv.conf 配置
-chattr -i /etc/resolv.conf
-cat > /etc/resolv.conf <<EOF
-nameserver 8.8.8.8
-nameserver 1.1.1.1
+# 定义配置项列表
+config_items=(
+    "net.ipv4.tcp_no_metrics_save"
+    "net.ipv4.tcp_ecn"
+    "net.ipv4.tcp_frto"
+    "net.ipv4.tcp_mtu_probing"
+    "net.ipv4.tcp_rfc1337"
+    "net.ipv4.tcp_sack"
+    "net.ipv4.tcp_fack"
+    "net.ipv4.tcp_window_scaling"
+    "net.ipv4.tcp_adv_win_scale"
+    "net.ipv4.tcp_moderate_rcvbuf"
+    "net.ipv4.tcp_rmem"
+    "net.ipv4.tcp_wmem"
+    "net.core.rmem_max"
+    "net.core.wmem_max"
+    "net.ipv4.udp_rmem_min"
+    "net.ipv4.udp_wmem_min"
+    "net.core.default_qdisc"
+    "net.ipv4.tcp_congestion_control"
+    "net.ipv4.conf.all.route_localnet"
+    "net.ipv4.ip_forward"
+    "net.ipv4.conf.all.forwarding"
+    "net.ipv4.conf.default.forwarding"
+)
+
+# 删除配置项并检测
+for item in "${config_items[@]}"; do
+    if grep -q "^${item}" /etc/sysctl.conf; then
+        sed -i "/^${item}/d" /etc/sysctl.conf
+        if grep -q "^${item}" /etc/sysctl.conf; then
+            echo "Error: Failed to remove ${item} from /etc/sysctl.conf"
+            exit 1
+        else
+            echo "Removed ${item} from /etc/sysctl.conf"
+        fi
+    fi
+done
+
+# 添加新的配置项
+cat >> /etc/sysctl.conf << EOF
+net.ipv4.tcp_no_metrics_save=1
+net.ipv4.tcp_ecn=1
+net.ipv4.tcp_frto=0
+net.ipv4.tcp_mtu_probing=0
+net.ipv4.tcp_rfc1337=0
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_fack=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_adv_win_scale=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.rmem_max=33554432
+net.core.wmem_max=33554432
+net.ipv4.tcp_rmem=4096 87380 33554432
+net.ipv4.tcp_wmem=4096 16384 33554432
+net.ipv4.udp_rmem_min=8192
+net.ipv4.udp_wmem_min=8192
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.conf.all.route_localnet=1
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.forwarding=1
+net.ipv4.conf.default.forwarding=1
 EOF
-chattr +i /etc/resolv.conf
 
-# 更新包列表
-apt-get update
+# 检测新配置项是否成功添加
+new_config_items=(
+    "net.ipv4.tcp_no_metrics_save=1"
+    "net.ipv4.tcp_ecn=1"
+    "net.ipv4.tcp_frto=0"
+    "net.ipv4.tcp_mtu_probing=0"
+    "net.ipv4.tcp_rfc1337=0"
+    "net.ipv4.tcp_sack=1"
+    "net.ipv4.tcp_fack=1"
+    "net.ipv4.tcp_window_scaling=1"
+    "net.ipv4.tcp_adv_win_scale=1"
+    "net.ipv4.tcp_moderate_rcvbuf=1"
+    "net.core.rmem_max=33554432"
+    "net.core.wmem_max=33554432"
+    "net.ipv4.tcp_rmem=4096 87380 33554432"
+    "net.ipv4.tcp_wmem=4096 16384 33554432"
+    "net.ipv4.udp_rmem_min=8192"
+    "net.ipv4.udp_wmem_min=8192"
+    "net.core.default_qdisc=fq"
+    "net.ipv4.tcp_congestion_control=bbr"
+    "net.ipv4.conf.all.route_localnet=1"
+    "net.ipv4.ip_forward=1"
+    "net.ipv4.conf.all.forwarding=1"
+    "net.ipv4.conf.default.forwarding=1"
+)
 
-# 安裝必要的軟件包
-apt-get install -y curl wget sudo
+for item in "${new_config_items[@]}"; do
+    if ! grep -q "^${item}" /etc/sysctl.conf; then
+        echo "Error: Failed to add ${item} to /etc/sysctl.conf"
+        exit 1
+    else
+        echo "Added ${item} to /etc/sysctl.conf"
+    fi
+done
 
-# 安裝 Docker
-curl -fsSL https://get.docker.com | bash -s docker
+# 重新加载系统参数
+sysctl -p && sysctl --system
 
-# 启用 BBR
-echo "启用 BBR..."
-echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-sysctl -p
-
-# 检查 BBR 是否成功启用
-echo "验证 BBR..."
-if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-    echo "BBR 已成功启用"
+if [ $? -eq 0 ]; then
+    echo "System parameters reloaded successfully."
 else
-    echo "BBR 启用失败"
+    echo "Error: Failed to reload system parameters."
+    exit 1
 fi
-
-# 启用 ECN
-echo "启用 ECN..."
-echo "net.ipv4.tcp_ecn=1" >> /etc/sysctl.conf
-sysctl -p
-
-# 检查 ECN 是否成功启用
-echo "验证 ECN..."
-if sysctl net.ipv4.tcp_ecn | grep -q "1"; then
-    echo "ECN 已成功启用"
-else
-    echo "ECN 启用失败"
-fi
-
-# 开启内核转发
-echo "开启内核转发..."
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-sysctl -p
-
-# 检查内核转发是否成功开启
-echo "验证内核转发..."
-if sysctl net.ipv4.ip_forward | grep -q "1"; then
-    echo "内核转发已成功开启"
-else
-    echo "内核转发开启失败"
-fi
-
-echo "所有设置及验证已完成。"
