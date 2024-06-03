@@ -1,6 +1,12 @@
 #!/bin/bash
 
-# 下載最新的 .deb 文件
+# 更新軟件包列表
+sudo apt-get update
+
+# 安裝 wget, jq, dpkg
+sudo apt-get install -y wget jq dpkg
+
+# 安裝內核頭文件和內核映像文件
 wget -q --show-progress $(wget -q -O - https://api.github.com/repos/love4taylor/linux-self-use-deb/releases/latest | jq -r '.assets[] | select(.name | contains ("deb")) | select(.name | contains ("cloud")) | .browser_download_url')
 
 # 安裝下載的 .deb 文件
