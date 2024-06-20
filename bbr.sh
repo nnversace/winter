@@ -1,111 +1,73 @@
 #!/bin/bash
 
-# 定义配置项列表
-config_items=(
-    "net.ipv4.tcp_no_metrics_save"
-    "net.ipv4.tcp_ecn"
-    "net.ipv4.tcp_frto"
-    "net.ipv4.tcp_mtu_probing"
-    "net.ipv4.tcp_rfc1337"
-    "net.ipv4.tcp_sack"
-    "net.ipv4.tcp_fack"
-    "net.ipv4.tcp_window_scaling"
-    "net.ipv4.tcp_adv_win_scale"
-    "net.ipv4.tcp_moderate_rcvbuf"
-    "net.ipv4.tcp_rmem"
-    "net.ipv4.tcp_wmem"
-    "net.core.rmem_max"
-    "net.core.wmem_max"
-    "net.ipv4.udp_rmem_min"
-    "net.ipv4.udp_wmem_min"
-    "net.core.default_qdisc"
-    "net.ipv4.tcp_congestion_control"
-    "net.ipv4.conf.all.route_localnet"
-    "net.ipv4.ip_forward"
-    "net.ipv4.conf.all.forwarding"
-    "net.ipv4.conf.default.forwarding"
-)
+# 打印当前配置
+echo "当前TCP窗口和UDP缓冲区大小设置:"
+sysctl net.ipv4.tcp_rmem
+sysctl net.ipv4.tcp_wmem
+sysctl net.core.rmem_default
+sysctl net.core.rmem_max
+sysctl net.core.wmem_default
+sysctl net.core.wmem_max
 
-# 删除配置项并检测
-for item in "${config_items[@]}"; do
-    if grep -q "^${item}" /etc/sysctl.conf; then
-        sed -i "/^${item}/d" /etc/sysctl.conf
-        if grep -q "^${item}" /etc/sysctl.conf; then
-            echo "Error: Failed to remove ${item} from /etc/sysctl.conf"
-            exit 1
-        else
-            echo "Removed ${item} from /etc/sysctl.conf"
-        fi
-    fi
-done
+# 修改/etc/sysctl.conf文件
+echo "修改/etc/sysctl.conf文件..."
 
-# 添加新的配置项
-cat >> /etc/sysctl.conf << EOF
-net.ipv4.tcp_no_metrics_save=1
-net.ipv4.tcp_ecn=1
-net.ipv4.tcp_frto=0
-net.ipv4.tcp_mtu_probing=0
-net.ipv4.tcp_rfc1337=0
-net.ipv4.tcp_sack=1
-net.ipv4.tcp_fack=1
-net.ipv4.tcp_window_scaling=1
-net.ipv4.tcp_adv_win_scale=1
-net.ipv4.tcp_moderate_rcvbuf=1
-net.core.rmem_max=33554432
-net.core.wmem_max=33554432
-net.ipv4.tcp_rmem=4096 87380 33554432
-net.ipv4.tcp_wmem=4096 16384 33554432
-net.ipv4.udp_rmem_min=8192
-net.ipv4.udp_wmem_min=8192
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.conf.all.route_localnet=1
-net.ipv4.ip_forward=1
-net.ipv4.conf.all.forwarding=1
-net.ipv4.conf.default.forwarding=1
-EOF
+sudo tee -a /etc/sysctl.conf > /dev/null <<EOT
+# TCP 窗口大小设置
+net.ipv4.tcp_rmem = 4096 87380 6291456
+net.ipv4.tcp_wmem = 4096 65536 6291456
 
-# 检测新配置项是否成功添加
-new_config_items=(
-    "net.ipv4.tcp_no_metrics_save=1"
-    "net.ipv4.tcp_ecn=1"
-    "net.ipv4.tcp_frto=0"
-    "net.ipv4.tcp_mtu_probing=0"
-    "net.ipv4.tcp_rfc1337=0"
-    "net.ipv4.tcp_sack=1"
-    "net.ipv4.tcp_fack=1"
-    "net.ipv4.tcp_window_scaling=1"
-    "net.ipv4.tcp_adv_win_scale=1"
-    "net.ipv4.tcp_moderate_rcvbuf=1"
-    "net.core.rmem_max=33554432"
-    "net.core.wmem_max=33554432"
-    "net.ipv4.tcp_rmem=4096 87380 33554432"
-    "net.ipv4.tcp_wmem=4096 16384 33554432"
-    "net.ipv4.udp_rmem_min=8192"
-    "net.ipv4.udp_wmem_min=8192"
-    "net.core.default_qdisc=fq"
-    "net.ipv4.tcp_congestion_control=bbr"
-    "net.ipv4.conf.all.route_localnet=1"
-    "net.ipv4.ip_forward=1"
-    "net.ipv4.conf.all.forwarding=1"
-    "net.ipv4.conf.default.forwarding=1"
-)
+# 启用TCP窗口自动调优
+net.ipv4.tcp_window_scaling = 1
 
-for item in "${new_config_items[@]}"; do
-    if ! grep -q "^${item}" /etc/sysctl.conf; then
-        echo "Error: Failed to add ${item} to /etc/sysctl.conf"
-        exit 1
-    else
-        echo "Added ${item} to /etc/sysctl.conf"
-    fi
-done
+# 启用TCP SACK（选择性确认）
+net.ipv4.tcp_sack = 1
 
-# 重新加载系统参数
-sysctl -p && sysctl --system
+# 启用TCP timestamps
+net.ipv4.tcp_timestamps = 1
 
-if [ $? -eq 0 ]; then
-    echo "System parameters reloaded successfully."
-else
-    echo "Error: Failed to reload system parameters."
-    exit 1
-fi
+# 启用TCP快速重传和恢复（Reno算法）
+net.ipv4.tcp_ecn = 1
+
+# UDP 缓冲区大小设置
+net.core.rmem_default = 262144
+net.core.rmem_max = 16777216
+net.core.wmem_default = 262144
+net.core.wmem_max = 16777216
+
+# 增加内核接收队列长度
+net.core.netdev_max_backlog = 250000
+
+# 增加用于接收数据包的最大默认缓冲区大小
+net.core.optmem_max = 16777216
+EOT
+
+# 应用sysctl.conf中的更改
+echo "应用更改..."
+sudo sysctl -p
+
+# 修改网络接口队列长度
+NETWORK_INTERFACE="eth0"
+echo "修改网络接口$NETWORK_INTERFACE队列长度..."
+sudo ifconfig $NETWORK_INTERFACE txqueuelen 10000
+
+# 持久化网络接口配置
+INTERFACES_FILE="/etc/network/interfaces"
+echo "持久化网络接口配置到$INTERFACES_FILE..."
+sudo tee -a $INTERFACES_FILE > /dev/null <<EOT
+
+auto $NETWORK_INTERFACE
+iface $NETWORK_INTERFACE inet dhcp
+    post-up /sbin/ifconfig $NETWORK_INTERFACE txqueuelen 10000
+EOT
+
+# 打印新的配置
+echo "新的TCP窗口和UDP缓冲区大小设置:"
+sysctl net.ipv4.tcp_rmem
+sysctl net.ipv4.tcp_wmem
+sysctl net.core.rmem_default
+sysctl net.core.rmem_max
+sysctl net.core.wmem_default
+sysctl net.core.wmem_max
+
+echo "TCP和UDP窗口调优完成。"
