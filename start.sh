@@ -13,10 +13,6 @@ else
     echo "sudo已安装。"
 fi
 
-# 设置时区为上海
-echo "设置时区为上海..."
-sudo timedatectl set-timezone Asia/Shanghai
-
 # 安装必要的工具
 echo "安装必要的工具..."
 sudo apt-get install -y \
@@ -47,4 +43,4 @@ curl -fsSL https://get.docker.com | sudo bash -s docker
 echo "检查已知的可用更新..."
 sudo apt list --upgradable
 
-echo "系统更新、必要工具安装、时区设置和Docker安装完成。"
+echo "系统更新、必要工具安装和Docker安装完成。"
