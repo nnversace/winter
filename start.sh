@@ -1,46 +1,52 @@
 #!/bin/bash
 
-# 更新包索引
-echo "更新包索引..."
-apt-get update
-
-# 检查是否安装sudo
-if ! command -v sudo &> /dev/null
-then
-    echo "sudo未安装，现在安装sudo..."
-    apt-get install -y sudo
-else
-    echo "sudo已安装。"
+# Ensure the script is run as root
+if [ "$(id -u)" != "0" ]; then
+    echo "Error: You must be root to run this script"
+    exit 1
 fi
 
-# 安装必要的工具
-echo "安装必要的工具..."
-sudo apt-get install -y \
-    curl \
-    git \
-    vim \
-    htop \
-    build-essential \
-    wget \
-    unzip \
-    net-tools \
-    software-properties-common
+# Function to check and install a package if not already installed
+check_and_install() {
+    if ! dpkg -l | grep -q "$1"; then
+        apt-get install -y "$1"
+    else
+        echo "$1 is already installed"
+    fi
+}
 
-# 升级已安装的软件包
-echo "升级已安装的软件包..."
-sudo apt-get upgrade -y
+# Update and upgrade system
+echo "Updating and upgrading system..."
+apt-get update && apt-get full-upgrade -y
 
-# 清理不再需要的包和依赖
-echo "清理不再需要的包和依赖..."
-sudo apt-get autoremove -y
-sudo apt-get autoclean -y
+# Install curl if not installed
+check_and_install "curl"
 
-# 安装Docker
-echo "安装Docker..."
-curl -fsSL https://get.docker.com | sudo bash -s docker
+# Install jq if not installed
+check_and_install "jq"
 
-# 检查是否有已知的可用更新，并列出所有升级的包
-echo "检查已知的可用更新..."
-sudo apt list --upgradable
+# Install wget if not installed
+check_and_install "wget"
 
-echo "系统更新、必要工具安装和Docker安装完成。"
+# Install Docker
+echo "Installing Docker..."
+curl -fsSL https://get.docker.com | bash -s docker
+
+# Configure TCP fast open
+echo "Configuring TCP fast open..."
+echo "3" > /proc/sys/net/ipv4/tcp_fastopen
+echo "net.ipv4.tcp_fastopen=3" > /etc/sysctl.d/30-tcp_fastopen.conf
+
+# Download the latest release of linux-self-use-deb
+echo "Downloading the latest release of linux-self-use-deb..."
+wget -q --show-progress $(wget -q -O - https://api.github.com/repos/love4taylor/linux-self-use-deb/releases/latest | jq -r '.assets[] | select(.name | contains("deb")) | select(.name | contains("cloud")) | .browser_download_url')
+
+# Install the downloaded packages
+echo "Installing the downloaded packages..."
+dpkg -i linux-headers-*-egoist-cloud_*.deb && dpkg -i linux-image-*-egoist-cloud_*.deb
+
+# Remove the downloaded packages after installation
+echo "Cleaning up downloaded packages..."
+rm -f linux-headers-*-egoist-cloud_*.deb linux-image-*-egoist-cloud_*.deb
+
+echo "Script execution completed."
