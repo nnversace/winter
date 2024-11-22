@@ -70,11 +70,6 @@ echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf
 echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf
 sysctl -p
 
-# 安装 Node.js 19.x
-echo "安装 Node.js 19.x..."
-curl -fsSL https://deb.nodesource.com/setup_19.x | bash -
-apt-get install -y nodejs
-
 echo "所有步骤完成！"
 
 cat << "EOF"
