@@ -63,11 +63,9 @@ sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_c
 sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 systemctl restart sshd
 
-# 修改系统 DNS 为 8.8.8.8 并禁用 IPv6
-echo "修改系统 DNS 并禁用 IPv6..."
+# 修改系统 DNS 为 8.8.8.8（保留 IPv6）
+echo "修改系统 DNS..."
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
-echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf
-echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf
 sysctl -p
 
 echo "所有步骤完成！"
@@ -77,7 +75,7 @@ cat << "EOF"
 重要提示：
 1. SSH 端口已修改为 14566
 2. 已禁用密码登录，请确保已添加 SSH 密钥
-3. IPv6 已禁用
+3. IPv6 已保持默认设置
 4. 系统 DNS 已设置为 8.8.8.8
 ==============================================
 EOF
