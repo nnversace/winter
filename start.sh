@@ -29,9 +29,11 @@ wget https://raw.githubusercontent.com/nnversace/winter/main/bbr.sh
 chmod +x bbr.sh
 bash bbr.sh
 
-# 下载并执行 ss.sh
-echo "下载并执行 ss.sh..."
-wget https://raw.githubusercontent.com/nnversace/winter/main/ss.sh && chmod +x ss.sh && ./ss.sh
+# 安装ss和snell
+echo "安装ss和snell..."
+wget https://raw.githubusercontent.com/nnversace/winter/main/ss.sh
+chmod +x ss.sh
+bash ss.sh
 
 # 路由测试工具
 echo "安装路由测试工具 nexttrace..."
