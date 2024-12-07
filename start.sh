@@ -29,6 +29,10 @@ wget https://raw.githubusercontent.com/nnversace/winter/main/bbr.sh
 chmod +x bbr.sh
 bash bbr.sh
 
+# 下载并执行 ss.sh
+echo "下载并执行 ss.sh..."
+wget https://raw.githubusercontent.com/nnversace/winter/main/ss.sh && chmod +x ss.sh && ./ss.sh
+
 # 路由测试工具
 echo "安装路由测试工具 nexttrace..."
 bash -c "$(wget -qO- https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh)"
@@ -75,7 +79,6 @@ cat << "EOF"
 重要提示：
 1. SSH 端口已修改为 14566
 2. 已禁用密码登录，请确保已添加 SSH 密钥
-3. IPv6 已保持默认设置
-4. 系统 DNS 已设置为 8.8.8.8
+3. 系统 DNS 已设置为 8.8.8.8
 ==============================================
 EOF
