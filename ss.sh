@@ -1,24 +1,57 @@
 #!/bin/bash
 
-# 创建 SS-Rust 目录和配置文件
-mkdir -p /root/ss-rust/
+# 创建 sing-box 目录和配置文件
+mkdir -p /root/sing-box/config
 
-cat > /root/ss-rust/docker-compose.yml << EOF
+cat > /root/sing-box/docker-compose.yml << EOF
 services:
-  ss-rust:
-    image: vocrx/ss-rust:latest
-    container_name: ss-rust
+  sing-box:
+    image: ghcr.io/sagernet/sing-box
+    container_name: sb
     restart: always
     network_mode: host
-    environment:
-      - LEVEL=1
-      - PORT=65271
-      - PASSWORD=K6zMgp5kAIQMO01xp8efhxRgjh4iAqVpbHXZUr1FC+c=
-      - METHOD=2022-blake3-chacha20-poly1305
-      - MODE=tcp_and_udp
+    volumes:
+      - ./config:/etc/sing-box
+    command: -D /var/lib/sing-box -C /etc/sing-box/ run
 EOF
 
-# 创建 Snell 目录和配置文件
+cat > /root/sing-box/config/config.json << EOF
+{
+  "log": {
+    "disabled": false,
+    "level": "info"
+  },
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "ss-in",
+      "listen": "::",
+      "listen_port": 52171,
+      "method": "2022-blake3-chacha20-poly1305",
+      "password": "K6zMgp5kAIQMO01xp8efhxRgjh4iAqVpbHXZUr1FC+c=",
+      "multiplex": {
+        "enabled": true,
+        "padding": true
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ss-no",
+      "listen": "::",
+      "listen_port": 52071,
+      "method": "none",
+      "password": "IUmuU/NjIQhHPMdBz5WONA==",
+      "multiplex": {
+        "enabled": true,
+        "padding": false
+      }
+    }
+  ]
+}
+EOF
+
+
+# 创建 snell 目录和配置文件
 mkdir -p /root/snell/
 
 cat > /root/snell/docker-compose.yml << EOF
@@ -41,12 +74,12 @@ psk = IUmuU/NjIQhHPMdBz5WONA==
 ipv6 = false
 EOF
 
-# 部署 SS-Rust
-cd /root/ss-rust
+# 部署 singbox
+cd /root/singbox
 docker compose pull && docker compose up -d
 
-# 部署 Snell
+# 部署 snell
 cd /root/snell
 docker compose pull && docker compose up -d
 
-echo "SS-Rust 和 Snell 服务已成功部署！"
+echo "singbox 和 snell 已成功部署！"
