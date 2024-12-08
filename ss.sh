@@ -74,12 +74,12 @@ psk = IUmuU/NjIQhHPMdBz5WONA==
 ipv6 = false
 EOF
 
-# 部署 singbox
-cd /root/singbox
+# 部署 sing-box
+cd /root/sing-box
 docker compose pull && docker compose up -d
 
 # 部署 snell
 cd /root/snell
 docker compose pull && docker compose up -d
 
-echo "singbox 和 snell 已成功部署！"
+echo "sing-box 和 snell 已成功部署！"
