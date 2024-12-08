@@ -29,8 +29,8 @@ wget https://raw.githubusercontent.com/nnversace/winter/main/bbr.sh
 chmod +x bbr.sh
 bash bbr.sh
 
-# 安装ss和snell
-echo "安装ss和snell..."
+# 安装ss
+echo "安装ss..."
 wget https://raw.githubusercontent.com/nnversace/winter/main/ss.sh
 chmod +x ss.sh
 bash ss.sh
