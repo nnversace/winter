@@ -50,28 +50,20 @@ cat > /root/sing-box/config/config.json << EOF
 }
 EOF
 
-
 # 创建 snell 目录和配置文件
 mkdir -p /root/snell/
 
 cat > /root/snell/docker-compose.yml << EOF
 services:
-  snell:
-    image: accors/snell:latest
-    container_name: snell
+  snell-server:
+    image: vocrx/snell-server:latest
+    container_name: snell-server
     restart: always
     network_mode: host
-    volumes:
-      - ./snell.conf:/etc/snell-server.conf
     environment:
-      - SNELL_URL=https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip
-EOF
-
-cat > /root/snell/snell.conf << EOF
-[snell-server]
-listen = ::0:5310
-psk = IUmuU/NjIQhHPMdBz5WONA==
-ipv6 = false
+      PORT: 5310
+      PSK: IUmuU/NjIQhHPMdBz5WONA==
+      IPV6: false
 EOF
 
 # 部署 sing-box
