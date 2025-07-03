@@ -43,14 +43,7 @@ else
     log "docker-compose 插件已安装"
 fi
 
-log "📥 执行外部优化脚本（bbr.sh / ss.sh / nexttrace）..."
-
-cd /root
-wget -q https://raw.githubusercontent.com/nnversace/winter/main/bbr.sh
-chmod +x bbr.sh && sh bbr.sh
-
-wget -q https://raw.githubusercontent.com/nnversace/winter/main/ss.sh
-chmod +x ss.sh && sh ss.sh
+log "📥 执行外部优化脚本（nexttrace）..."
 
 wget -qO- https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh | sh
 
