@@ -38,4 +38,4 @@ net.ipv4.conf.all.route_localnet= 1
 EOF
 
 # Reload sysctl settings
-sysctl -p && sysctl --system
+sysctl -p
