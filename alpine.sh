@@ -43,10 +43,6 @@ else
     log "docker-compose 插件已安装"
 fi
 
-log "📥 执行外部优化脚本（nexttrace）..."
-
-wget -qO- https://github.com/sjlleo/nexttrace/raw/main/nt_install.sh | sh
-
 log "🚀 配置 sing-box..."
 mkdir -p /root/sing-box/config
 cat > /root/sing-box/docker-compose.yml <<EOF
