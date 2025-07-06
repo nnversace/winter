@@ -17,34 +17,25 @@ declare -A MODULES_TO_RUN
 
 # --- 基础函数 ---
 log() {
-    local type="$2"
-    local color
-    case "$type" in
-        "title") color="\033[1;35m" ;;  # 紫色
-        "info")  color="\033[0;36m" ;;  # 青色
-        "warn")  color="\033[0;33m" ;;  # 黄色
-        "error") color="\033[0;31m" ;;  # 红色
-        "ok")    color="\033[0;32m" ;;  # 绿色
-        *)       color="\033[0;32m" ;;
-    esac
-    echo -e "${color}${1}\033[0m"
+    # 移除了颜色代码，只进行标准输出
+    echo -e "$1"
 }
 
-step_start() { log "▶ $1..." "title"; }
-step_end() { log "✓ $1 完成" "ok"; echo; }
-step_fail() { log "✗ $1 失败" "error"; exit 1; }
+step_start() { log "▶ $1..."; }
+step_end() { log "✓ $1 完成\n"; }
+step_fail() { log "✗ $1 失败"; exit 1; }
 
 # --- 模块管理函数 ---
 download_module() {
     local module_name="$1"
     local module_file="$TEMP_DIR/${module_name}.sh"
-    log "  Downloading module: $module_name" "info"
+    log "  Downloading module: $module_name"
     if curl -fsSL "$MODULE_BASE_URL/${module_name}.sh" -o "$module_file"; then
         chmod +x "$module_file"
-        log "  Module $module_name downloaded successfully." "ok"
+        log "  Module $module_name downloaded successfully."
         return 0
     else
-        log "  Module $module_name download failed." "error"
+        log "  Module $module_name download failed."
         return 1
     fi
 }
@@ -52,14 +43,14 @@ download_module() {
 execute_module() {
     local module_name="$1"
     local module_file="$TEMP_DIR/${module_name}.sh"
-    [ ! -f "$module_file" ] && { log "  Module file not found: $module_file" "error"; return 1; }
+    [ ! -f "$module_file" ] && { log "  Module file not found: $module_file"; return 1; }
 
     log "  Executing module: $module_name"
     if bash "$module_file"; then
-        log "  Module $module_name executed successfully." "ok"
+        log "  Module $module_name executed successfully."
         return 0
     else
-        log "  Module $module_name execution failed." "error"
+        log "  Module $module_name execution failed."
         return 1
     fi
 }
@@ -82,7 +73,7 @@ ask_user_for_module() {
     local description="$2"
     local choice
     local prompt_msg="? 是否执行 $description 模块?"
-    
+
     # 如果指定了特定模块，则直接返回成功
     if [ ${#MODULES_TO_RUN[@]} -gt 0 ]; then
         [[ -n "${MODULES_TO_RUN[$module_name]}" ]] && return 0 || return 1
@@ -109,57 +100,57 @@ main() {
     while [[ "$#" -gt 0 ]]; do
         case $1 in
             -y|--yes) INTERACTIVE_MODE=false; shift ;;
-            -m|--module) 
+            -m|--module)
                 if [[ -n "$2" && "$2" != -* ]]; then
                     MODULES_TO_RUN["$2"]=1
                     shift 2
                 else
-                    log "错误: --module 参数需要一个模块名" "error"; exit 1
+                    log "错误: --module 参数需要一个模块名"; exit 1
                 fi
                 ;;
-            *) log "未知参数: $1" "error"; exit 1 ;;
+            *) log "未知参数: $1"; exit 1 ;;
         esac
     done
 
     # --- 步骤 1: 基础环境检查 ---
     step_start "步骤 1: 基础环境检查和准备"
-    
+
     # 权限和系统检查
     [ "$(id -u)" != "0" ] && step_fail "此脚本必须以 root 用户身份运行"
     [ ! -f /etc/debian_version ] && step_fail "此脚本仅适用于 Debian 系统"
-    
+
     debian_version=$(cut -d. -f1 < /etc/debian_version)
     if [ "$debian_version" -lt 12 ]; then
-        log "警告: 此脚本为 Debian 12+ 优化。当前版本: $(cat /etc/debian_version)" "warn"
+        log "警告: 此脚本为 Debian 12+ 优化。当前版本: $(cat /etc/debian_version)"
         if $INTERACTIVE_MODE; then
             read -p "确定继续? (y/n): " continue_install
             [[ "$continue_install" != "y" ]] && exit 1
         fi
     fi
 
-    [ -f "$STATUS_FILE" ] && RERUN_MODE=true && log "检测到之前的部署记录，以更新模式执行。" "info"
+    [ -f "$STATUS_FILE" ] && RERUN_MODE=true && log "检测到之前的部署记录，以更新模式执行。"
 
     # 网络检查
     log "正在检查网络连接..."
     if ! curl -fsSL --connect-timeout 5 https://cp.cloudflare.com > /dev/null; then
-        log "警告: 网络连接不稳定或无法访问外部网络。" "warn"
+        log "警告: 网络连接不稳定或无法访问外部网络。"
         if $INTERACTIVE_MODE; then
             read -p "继续执行? (y/n): " continue_install
             [[ "$continue_install" != "y" ]] && exit 1
         fi
     fi
-    log "网络连接正常。" "ok"
-    
+    log "网络连接正常。"
+
     # 安装基础工具
-    log "正在检查和安装基础工具..." "info"
+    log "正在检查和安装基础工具..."
     apt-get update -qq
     for cmd in curl wget apt git jq; do
         if ! command -v $cmd &>/dev/null; then
-            log "安装基础工具: $cmd" "warn"
+            log "安装基础工具: $cmd"
             apt-get install -y -qq $cmd || step_fail "安装 $cmd 失败"
         fi
     done
-    
+
     mkdir -p "$TEMP_DIR"
     step_end "步骤 1"
 
@@ -168,10 +159,10 @@ main() {
 
     apt-get update
     if $RERUN_MODE; then
-        log "更新模式: 执行软件包升级 (apt upgrade)" "info"
+        log "更新模式: 执行软件包升级 (apt upgrade)"
         apt-get upgrade -y
     else
-        log "首次运行: 执行完整系统升级 (apt full-upgrade)" "info" 
+        log "首次运行: 执行完整系统升级 (apt full-upgrade)"
         apt-get full-upgrade -y
     fi
     apt-get autoremove -y && apt-get autoclean -y
@@ -184,14 +175,14 @@ main() {
     done
 
     if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
-        log "安装核心软件包: ${MISSING_PACKAGES[*]}" "info"
+        log "安装核心软件包: ${MISSING_PACKAGES[*]}"
         apt-get install -y "${MISSING_PACKAGES[@]}" || step_fail "核心软件包安装失败"
     fi
-    
+
     # 修复 hosts 文件
     HOSTNAME=$(hostname)
     if ! grep -q "^127.0.1.1.*$HOSTNAME" /etc/hosts; then
-        log "修复 hosts 文件..." "info"
+        log "修复 hosts 文件..."
         sed -i "/^127.0.1.1/d" /etc/hosts
         echo "127.0.1.1 $HOSTNAME" >> /etc/hosts
     fi
@@ -199,7 +190,7 @@ main() {
 
     # --- 步骤 3: 模块化部署 ---
     step_start "步骤 3: 模块化功能部署"
-    
+
     declare -A MODULES=(
         ["system-optimize"]="系统优化 (Zram, 时区, 服务管理)"
         ["zsh-setup"]="Zsh Shell 环境 (Oh-My-Zsh + 主题插件)"
@@ -216,7 +207,7 @@ main() {
 
     for module in "${MODULE_ORDER[@]}"; do
         description="${MODULES[$module]}"
-        
+
         if ask_user_for_module "$module" "$description"; then
             log "\n处理模块: $module"
             if download_module "$module"; then
@@ -229,36 +220,36 @@ main() {
                 FAILED_MODULES+=("$module")
             fi
         else
-            log "跳过模块: $module" "info"
+            log "跳过模块: $module"
         fi
     done
     step_end "步骤 3"
-    
+
     # --- 步骤 4: 部署摘要 ---
     step_start "步骤 4: 生成部署摘要"
-    
-    log "\n╔═════════════════════════════════════════╗" "title"
-    log "║           系统部署完成摘要                ║" "title"
-    log "╚═════════════════════════════════════════╝" "title"
-    
-    show_info() { log " • $1: $2" "info"; }
+
+    log "\n╔═════════════════════════════════════════╗"
+    log "║           系统部署完成摘要                ║"
+    log "╚═════════════════════════════════════════╝"
+
+    show_info() { log " • $1: $2"; }
 
     show_info "脚本版本" "$SCRIPT_VERSION"
     show_info "部署模式" "$(if $RERUN_MODE; then echo "更新模式"; else echo "首次部署"; fi)"
     show_info "操作系统" "$(grep 'PRETTY_NAME' /etc/os-release | cut -d= -f2 | tr -d '"' 2>/dev/null || echo 'Debian')"
     show_info "内核版本" "$(uname -r)"
-    
+
     if [ ${#EXECUTED_MODULES[@]} -gt 0 ]; then
-        log "\n✅ 成功执行的模块:" "ok"
+        log "\n✅ 成功执行的模块:"
         printf "   • %s\n" "${EXECUTED_MODULES[@]}"
     fi
-    
+
     if [ ${#FAILED_MODULES[@]} -gt 0 ]; then
-        log "\n❌ 执行失败的模块:" "error"
+        log "\n❌ 执行失败的模块:"
         printf "   • %s\n" "${FAILED_MODULES[@]}"
     fi
 
-    log "\n📊 当前系统状态:" "info"
+    log "\n📊 当前系统状态:"
     if command -v zsh &>/dev/null; then show_info "Zsh Shell" "已安装 ($(zsh --version 2>/dev/null))"; else show_info "Zsh Shell" "未安装"; fi
     if command -v docker &>/dev/null; then show_info "Docker" "已安装 ($(docker --version 2>/dev/null))"; else show_info "Docker" "未安装"; fi
     SSH_PORT=$(grep -i "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22")
@@ -266,15 +257,15 @@ main() {
     CURR_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     show_info "网络拥塞控制" "$CURR_CC"
 
-    log "\n──────────────────────────────────────────────────" "title"
-    log " 部署完成时间: $(date '+%Y-%m-%d %H:%M:%S %Z')" "info"
-    log "──────────────────────────────────────────────────\n" "title"
-    
+    log "\n──────────────────────────────────────────────────"
+    log " 部署完成时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    log "──────────────────────────────────────────────────\n"
+
     step_end "步骤 4"
 
     # --- 步骤 5: 保存部署状态 ---
     step_start "步骤 5: 保存部署状态"
-    
+
     if command -v jq &>/dev/null; then
         jq -n \
           --arg version "$SCRIPT_VERSION" \
@@ -296,7 +287,7 @@ main() {
              }
            }' > "$STATUS_FILE"
     else
-        log "警告: 'jq' 命令未找到，使用原生方式生成状态文件，可能不稳定。" "warn"
+        log "警告: 'jq' 命令未找到，使用原生方式生成状态文件，可能不稳定。"
         # Fallback to the original method
         executed_json=$(printf '"%s",' "${EXECUTED_MODULES[@]}" | sed 's/,$//')
         failed_json=$(printf '"%s",' "${FAILED_MODULES[@]}" | sed 's/,$//')
@@ -315,23 +306,23 @@ main() {
 EOF
     fi
     step_end "步骤 5"
-    
+
     # --- 清理和最终提示 ---
     rm -rf "$TEMP_DIR"
-    log "✅ 所有部署任务完成!" "title"
-    
+    log "✅ 所有部署任务完成!"
+
     if [[ " ${EXECUTED_MODULES[@]} " =~ " ssh-security " ]]; then
         if [ "$SSH_PORT" != "22" ] && [ -n "$SSH_PORT" ]; then
-            log "⚠️  重要: SSH 端口已更改为 $SSH_PORT" "warn"
-            log "   请使用新端口连接: ssh -p $SSH_PORT user@server" "warn"
+            log "⚠️  重要: SSH 端口已更改为 $SSH_PORT"
+            log "   请使用新端口连接: ssh -p $SSH_PORT user@server"
         fi
     fi
     if [[ " ${EXECUTED_MODULES[@]} " =~ " zsh-setup " ]]; then
-        log "🐚 Zsh 使用提示: 重新连接 SSH 或执行 'exec zsh' 来体验新 Shell。" "info"
+        log "🐚 Zsh 使用提示: 重新连接 SSH 或执行 'exec zsh' 来体验新 Shell。"
     fi
-    
-    log "🔄 可随时重新运行此脚本进行更新或维护。" "info"
-    log "📄 部署状态已保存到: $STATUS_FILE" "info"
+
+    log "🔄 可随时重新运行此脚本进行更新或维护。"
+    log "📄 部署状态已保存到: $STATUS_FILE"
 }
 
 # --- 脚本入口 ---
