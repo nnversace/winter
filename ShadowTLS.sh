@@ -106,35 +106,36 @@ create_config_dir() {
 
 # 生成随机密码
 generate_password() {
-    echo $(openssl rand -base64 32 | tr -d "=+/" | cut -c1-16)
+    echo $(openssl rand -base64 32 | tr -d "=+/" | cut -c1-22)
 }
 
 # 获取用户输入
 get_user_input() {
     info "请输入配置信息:"
     
-    read -p "请输入ShadowTLS监听端口 (默认: 443): " SHADOWTLS_PORT
-    SHADOWTLS_PORT=${SHADOWTLS_PORT:-443}
+    read -p "请输入ShadowTLS监听端口 (默认: 8443): " LISTEN_PORT
+    LISTEN_PORT=${LISTEN_PORT:-8443}
     
-    read -p "请输入Shadowsocks监听端口 (默认: 8388): " SS_PORT
-    SS_PORT=${SS_PORT:-8388}
+    read -p "请输入后端服务器地址 (默认: 127.0.0.1:52171): " SERVER_ADDR
+    SERVER_ADDR=${SERVER_ADDR:-127.0.0.1:52171}
     
-    read -p "请输入Shadowsocks密码 (回车自动生成): " SS_PASSWORD
-    if [[ -z "$SS_PASSWORD" ]]; then
-        SS_PASSWORD=$(generate_password)
-        info "自动生成的密码: $SS_PASSWORD"
-    fi
-    
-    read -p "请输入Shadowsocks加密方法 (默认: chacha20-ietf-poly1305): " SS_METHOD
-    SS_METHOD=${SS_METHOD:-chacha20-ietf-poly1305}
-    
-    read -p "请输入TLS握手目标域名 (默认: www.bing.com): " TLS_TARGET
-    TLS_TARGET=${TLS_TARGET:-www.bing.com}
+    read -p "请输入TLS握手目标域名 (默认: gateway.icloud.com): " TLS_TARGET
+    TLS_TARGET=${TLS_TARGET:-gateway.icloud.com}
     
     read -p "请输入ShadowTLS密码 (回车自动生成): " SHADOWTLS_PASSWORD
     if [[ -z "$SHADOWTLS_PASSWORD" ]]; then
         SHADOWTLS_PASSWORD=$(generate_password)
-        info "自动生成的ShadowTLS密码: $SHADOWTLS_PASSWORD"
+        info "自动生成的密码: $SHADOWTLS_PASSWORD"
+    fi
+    
+    read -p "请输入监听地址 (默认: ::0 支持IPv4/IPv6): " LISTEN_ADDR
+    LISTEN_ADDR=${LISTEN_ADDR:-::0}
+    
+    read -p "是否启用详细日志 (y/N): " ENABLE_DEBUG
+    if [[ "$ENABLE_DEBUG" =~ ^[Yy]$ ]]; then
+        RUST_LOG_LEVEL="debug"
+    else
+        RUST_LOG_LEVEL="error"
     fi
 }
 
@@ -146,37 +147,21 @@ create_docker_compose() {
 version: '3.8'
 
 services:
-  shadowsocks:
-    image: shadowsocks/shadowsocks-libev:latest
-    container_name: shadowsocks
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:${SS_PORT}:${SS_PORT}"
+  shadow-tls:
+    image: ghcr.io/ihciah/shadow-tls:latest
+    container_name: shadow-tls
+    restart: always
+    network_mode: "host"
     environment:
-      - METHOD=${SS_METHOD}
-      - PASSWORD=${SS_PASSWORD}
-      - SERVER_PORT=${SS_PORT}
-    command: ss-server -s 0.0.0.0 -p ${SS_PORT} -k ${SS_PASSWORD} -m ${SS_METHOD} -u
-    networks:
-      - shadowtls_network
-
-  shadowtls:
-    image: ihciah/shadow-tls:latest
-    container_name: shadowtls
-    restart: unless-stopped
-    ports:
-      - "${SHADOWTLS_PORT}:${SHADOWTLS_PORT}"
-    environment:
-      - RUST_LOG=info
-    command: shadow-tls --v3 server --listen 0.0.0.0:${SHADOWTLS_PORT} --server 127.0.0.1:${SS_PORT} --tls ${TLS_TARGET}:443 --password ${SHADOWTLS_PASSWORD}
-    depends_on:
-      - shadowsocks
-    networks:
-      - shadowtls_network
-
-networks:
-  shadowtls_network:
-    driver: bridge
+      - MODE=server
+      - LISTEN=${LISTEN_ADDR}:${LISTEN_PORT}
+      - SERVER=${SERVER_ADDR}
+      - TLS=${TLS_TARGET}:443
+      - PASSWORD=${SHADOWTLS_PASSWORD}
+      - V3=1
+      - RUST_LOG=${RUST_LOG_LEVEL}
+    security_opt:
+      - seccomp:unconfined
 EOF
     
     success "Docker Compose 配置已创建"
@@ -202,16 +187,16 @@ show_config() {
     echo ""
     echo "==================== ShadowTLS 配置信息 ===================="
     echo "服务器地址: $(curl -s ifconfig.me)"
-    echo "ShadowTLS端口: $SHADOWTLS_PORT"
-    echo "ShadowTLS密码: $SHADOWTLS_PASSWORD"
-    echo "Shadowsocks端口: $SS_PORT"
-    echo "Shadowsocks密码: $SS_PASSWORD"
-    echo "Shadowsocks加密方法: $SS_METHOD"
+    echo "监听端口: $LISTEN_PORT"
+    echo "监听地址: $LISTEN_ADDR"
+    echo "后端服务器: $SERVER_ADDR"
     echo "TLS握手目标: $TLS_TARGET"
+    echo "ShadowTLS密码: $SHADOWTLS_PASSWORD"
+    echo "日志级别: $RUST_LOG_LEVEL"
     echo "=============================================================="
     echo ""
     echo "客户端配置示例:"
-    echo "shadow-tls --v3 client --listen 127.0.0.1:1080 --server $(curl -s ifconfig.me):$SHADOWTLS_PORT --tls $TLS_TARGET:443 --password $SHADOWTLS_PASSWORD"
+    echo "shadow-tls --v3 client --listen 127.0.0.1:1080 --server $(curl -s ifconfig.me):$LISTEN_PORT --tls $TLS_TARGET:443 --password $SHADOWTLS_PASSWORD"
     echo ""
 }
 
@@ -223,15 +208,34 @@ save_config() {
 ShadowTLS 配置信息
 ==================
 服务器地址: $(curl -s ifconfig.me)
-ShadowTLS端口: $SHADOWTLS_PORT
-ShadowTLS密码: $SHADOWTLS_PASSWORD
-Shadowsocks端口: $SS_PORT
-Shadowsocks密码: $SS_PASSWORD
-Shadowsocks加密方法: $SS_METHOD
+监听端口: $LISTEN_PORT
+监听地址: $LISTEN_ADDR
+后端服务器: $SERVER_ADDR
 TLS握手目标: $TLS_TARGET
+ShadowTLS密码: $SHADOWTLS_PASSWORD
+日志级别: $RUST_LOG_LEVEL
 
 客户端配置命令:
-shadow-tls --v3 client --listen 127.0.0.1:1080 --server $(curl -s ifconfig.me):$SHADOWTLS_PORT --tls $TLS_TARGET:443 --password $SHADOWTLS_PASSWORD
+shadow-tls --v3 client --listen 127.0.0.1:1080 --server $(curl -s ifconfig.me):$LISTEN_PORT --tls $TLS_TARGET:443 --password $SHADOWTLS_PASSWORD
+
+Docker Compose 配置:
+version: '3.8'
+services:
+  shadow-tls:
+    image: ghcr.io/ihciah/shadow-tls:latest
+    container_name: shadow-tls
+    restart: always
+    network_mode: "host"
+    environment:
+      - MODE=server
+      - LISTEN=$LISTEN_ADDR:$LISTEN_PORT
+      - SERVER=$SERVER_ADDR
+      - TLS=$TLS_TARGET:443
+      - PASSWORD=$SHADOWTLS_PASSWORD
+      - V3=1
+      - RUST_LOG=$RUST_LOG_LEVEL
+    security_opt:
+      - seccomp:unconfined
 EOF
     
     success "配置已保存到 shadowtls_config.txt"
@@ -247,7 +251,9 @@ show_menu() {
     echo "4. 重启服务"
     echo "5. 查看状态"
     echo "6. 查看日志"
-    echo "7. 卸载 ShadowTLS"
+    echo "7. 查看配置"
+    echo "8. 更新配置"
+    echo "9. 卸载 ShadowTLS"
     echo "0. 退出"
     echo "=============================================================="
 }
@@ -257,6 +263,8 @@ check_status() {
     info "检查服务状态..."
     cd /opt/shadowtls
     docker-compose ps
+    echo ""
+    docker stats shadow-tls --no-stream
 }
 
 # 查看日志
@@ -282,6 +290,33 @@ restart_service() {
     success "服务已重启"
 }
 
+# 查看当前配置
+view_config() {
+    if [[ -f /opt/shadowtls/shadowtls_config.txt ]]; then
+        info "当前配置信息:"
+        cat /opt/shadowtls/shadowtls_config.txt
+    else
+        warning "配置文件不存在，请先安装 ShadowTLS"
+    fi
+}
+
+# 更新配置
+update_config() {
+    if [[ ! -f /opt/shadowtls/docker-compose.yml ]]; then
+        warning "请先安装 ShadowTLS"
+        return
+    fi
+    
+    info "更新配置..."
+    cd /opt/shadowtls
+    docker-compose down
+    get_user_input
+    create_docker_compose
+    start_service
+    show_config
+    save_config
+}
+
 # 卸载服务
 uninstall_service() {
     warning "确定要卸载 ShadowTLS 吗？这将删除所有配置文件。"
@@ -291,7 +326,7 @@ uninstall_service() {
         info "卸载 ShadowTLS..."
         cd /opt/shadowtls
         docker-compose down
-        docker rmi shadowsocks/shadowsocks-libev:latest ihciah/shadow-tls:latest 2>/dev/null
+        docker rmi ghcr.io/ihciah/shadow-tls:latest 2>/dev/null
         cd /
         rm -rf /opt/shadowtls
         success "ShadowTLS 已卸载"
@@ -344,6 +379,12 @@ main() {
                     view_logs
                     ;;
                 7)
+                    view_config
+                    ;;
+                8)
+                    update_config
+                    ;;
+                9)
                     uninstall_service
                     ;;
                 0)
