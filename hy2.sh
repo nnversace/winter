@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # Hysteria2 一键配置脚本
-# 功能：去除防火墙限制并查看证书SHA256指纹
 
 set -e
 
