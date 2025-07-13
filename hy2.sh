@@ -28,10 +28,10 @@ log_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
 
-# 生成随机密码
-generate_password() {
-    PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-24)
-    log_info "已生成随机密码: $PASSWORD"
+# 设置固定密码
+set_fixed_password() {
+    PASSWORD="IUmuU/NjIQhHPMdBz5WONA=="
+    log_info "使用固定密码: $PASSWORD"
 }
 
 # 获取Cloudflare 15年证书
@@ -155,6 +155,7 @@ EOF
     
     log_info "Docker Compose文件已生成: ./docker-compose.yml"
 }
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "请使用root权限运行此脚本"
@@ -177,53 +178,7 @@ detect_system() {
     log_info "检测到系统类型: $SYSTEM"
 }
 
-# 停止并禁用防火墙
-disable_firewall() {
-    log_step "正在禁用防火墙..."
-    
-    case $SYSTEM in
-        "centos")
-            # CentOS/RHEL/Rocky Linux
-            systemctl stop firewalld 2>/dev/null || true
-            systemctl disable firewalld 2>/dev/null || true
-            systemctl stop iptables 2>/dev/null || true
-            systemctl disable iptables 2>/dev/null || true
-            # 清空iptables规则
-            iptables -F 2>/dev/null || true
-            iptables -X 2>/dev/null || true
-            iptables -t nat -F 2>/dev/null || true
-            iptables -t nat -X 2>/dev/null || true
-            log_info "CentOS/RHEL 防火墙已禁用"
-            ;;
-        "debian")
-            # Debian/Ubuntu
-            systemctl stop ufw 2>/dev/null || true
-            systemctl disable ufw 2>/dev/null || true
-            ufw --force disable 2>/dev/null || true
-            systemctl stop iptables 2>/dev/null || true
-            systemctl disable iptables 2>/dev/null || true
-            # 清空iptables规则
-            iptables -F 2>/dev/null || true
-            iptables -X 2>/dev/null || true
-            iptables -t nat -F 2>/dev/null || true
-            iptables -t nat -X 2>/dev/null || true
-            log_info "Debian/Ubuntu 防火墙已禁用"
-            ;;
-        "arch")
-            # Arch Linux
-            systemctl stop ufw 2>/dev/null || true
-            systemctl disable ufw 2>/dev/null || true
-            systemctl stop iptables 2>/dev/null || true
-            systemctl disable iptables 2>/dev/null || true
-            # 清空iptables规则
-            iptables -F 2>/dev/null || true
-            iptables -X 2>/dev/null || true
-            iptables -t nat -F 2>/dev/null || true
-            iptables -t nat -X 2>/dev/null || true
-            log_info "Arch Linux 防火墙已禁用"
-            ;;
-    esac
-}
+
 
 # 开放端口
 open_ports() {
@@ -236,11 +191,7 @@ open_ports() {
         log_info "端口5271可用"
     fi
     
-    # 设置iptables规则允许端口
-    iptables -I INPUT -p tcp --dport 5271 -j ACCEPT 2>/dev/null || true
-    iptables -I INPUT -p udp --dport 5271 -j ACCEPT 2>/dev/null || true
-    
-    log_info "端口5271已开放"
+    log_info "端口5271检查完成"
 }
 
 # 查看证书SHA256指纹
@@ -322,6 +273,7 @@ EOF
     
     log_info "配置信息已保存到: /tmp/hysteria2_config.txt"
 }
+
 check_hysteria_status() {
     log_step "检查Hysteria2服务状态..."
     
@@ -374,9 +326,8 @@ main() {
     
     check_root
     detect_system
-    generate_password
+    set_fixed_password
     get_cloudflare_cert
-    disable_firewall
     open_ports
     generate_hysteria_config
     generate_docker_compose
