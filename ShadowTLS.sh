@@ -2,7 +2,6 @@
 
 # ShadowTLS 一键安装与管理脚本（精简优化版）
 # 版本: v2.1
-# 作者: ChatGPT 优化
 set -euo pipefail
 
 # 配置常量
