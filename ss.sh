@@ -24,7 +24,7 @@ cat > /root/sing-box/config/config.json << EOF
   "inbounds": [
     {
       "type": "shadowsocks",
-      "tag": "ss-in",
+      "tag": "ss-1",
       "listen": "::",
       "listen_port": 52171,
       "method": "2022-blake3-chacha20-poly1305",
@@ -36,10 +36,10 @@ cat > /root/sing-box/config/config.json << EOF
     },
     {
       "type": "shadowsocks",
-      "tag": "ss-no",
+      "tag": "ss-2",
       "listen": "::",
       "listen_port": 52071,
-      "method": "none",
+      "method": "2022-blake3-aes-128-gcm",
       "password": "IUmuU/NjIQhHPMdBz5WONA==",
       "multiplex": {
         "enabled": true,
