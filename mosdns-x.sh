@@ -1,26 +1,39 @@
 #!/bin/bash
 
-# Mosdns-x 一键安装脚本
-# 适用于 Linux 系统
-# 作者: 基于 pmkol/mosdns-x 项目制作
+# Mosdns-x One-Click Installation Script (Optimized)
+#
+# This script automates the installation and configuration of mosdns-x.
+# Project: https://github.com/pmkol/mosdns-x
+#
+# Enhancements:
+# - Improved UI and user interaction.
+# - Pre-installation check to prevent accidental re-installations.
+# - Updated default configuration with modern DNS upstreams (QUIC, TLS).
+# - Graceful exit on interruption.
 
 set -e
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# 配置变量
+# --- Configuration Variables ---
 GITHUB_REPO="pmkol/mosdns-x"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/mosdns"
 SERVICE_NAME="mosdns"
 LATEST_VERSION=""
 
-# 日志函数
+# --- UI Color Definitions ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# --- Logging and Utility Functions ---
+
+# Function to handle script interruption (Ctrl+C)
+trap 'echo -e "\n${RED}Operation cancelled by user.${NC}"; exit 1;' INT
+
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -37,155 +50,134 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# 检查是否为 root 用户
+show_banner() {
+    echo -e "${PURPLE}"
+    echo "=========================================="
+    echo "   Mosdns-x One-Click Installer Script    "
+    echo "=========================================="
+    echo -e "${NC}"
+}
+
+# --- Pre-flight Checks ---
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        log_error "此脚本需要 root 权限运行"
-        log_info "请使用: sudo $0"
+        log_error "This script requires root privileges to run."
+        log_info "Please use: sudo $0"
         exit 1
     fi
 }
 
-# 检查系统架构
+check_existing_install() {
+    if [[ -f "$INSTALL_DIR/mosdns" ]]; then
+        log_warning "Mosdns appears to be already installed at $INSTALL_DIR/mosdns."
+        read -p "Do you want to proceed with re-installation? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Installation aborted."
+            exit 0
+        fi
+    fi
+}
+
 detect_arch() {
     local arch=$(uname -m)
     case $arch in
-        x86_64)
-            echo "amd64"
-            ;;
-        aarch64|arm64)
-            echo "arm64"
-            ;;
-        armv7l)
-            echo "armv7"
-            ;;
-        i386|i686)
-            echo "386"
-            ;;
+        x86_64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        armv7l) echo "armv7" ;;
+        i386|i686) echo "386" ;;
         *)
-            log_error "不支持的系统架构: $arch"
+            log_error "Unsupported system architecture: $arch"
             exit 1
             ;;
     esac
 }
 
-# 检查系统类型
 detect_os() {
     if [[ -f /etc/os-release ]]; then
         source /etc/os-release
-        echo $ID
+        echo "$ID"
     else
         echo "unknown"
     fi
 }
 
-# 安装必要的依赖
+# --- Core Installation Functions ---
+
 install_dependencies() {
-    log_info "安装必要的依赖包..."
-    
+    log_info "Installing necessary dependencies (curl, wget, unzip, systemd)..."
     local os=$(detect_os)
+    
     case $os in
         ubuntu|debian)
-            apt update
-            apt install -y curl wget tar unzip systemd
+            apt-get update -qq
+            apt-get install -y curl wget unzip systemd
             ;;
         centos|rhel|fedora|almalinux)
             if command -v dnf &> /dev/null; then
-                dnf install -y curl wget tar unzip systemd
+                dnf install -y curl wget unzip systemd
             else
-                yum install -y curl wget tar unzip systemd
+                yum install -y curl wget unzip systemd
             fi
             ;;
         arch|manjaro)
-            pacman -Sy --noconfirm curl wget tar unzip systemd
+            pacman -Sy --noconfirm --needed curl wget unzip systemd
             ;;
         *)
-            log_warning "未知的操作系统，请手动安装: curl, wget, tar, unzip, systemd"
+            log_warning "Unknown OS. Please manually install: curl, wget, unzip, systemd."
             ;;
     esac
 }
 
-# 获取最新版本号
 get_latest_version() {
-    log_info "获取最新版本信息..."
-    
+    log_info "Fetching the latest version information from GitHub..."
     LATEST_VERSION=$(curl -s "https://api.github.com/repos/$GITHUB_REPO/releases/latest" | \
                      grep '"tag_name"' | \
                      sed -E 's/.*"([^"]+)".*/\1/')
     
     if [[ -z "$LATEST_VERSION" ]]; then
-        log_error "无法获取最新版本信息"
+        log_error "Failed to fetch the latest version. Please check your network or GitHub API rate limits."
         exit 1
     fi
     
-    log_success "最新版本: $LATEST_VERSION"
+    log_success "Latest version identified: ${CYAN}$LATEST_VERSION${NC}"
 }
 
-# 下载 mosdns-x 二进制文件
 download_mosdns() {
     local arch=$(detect_arch)
     local download_url="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/mosdns-linux-$arch.zip"
-    
-    log_info "下载 mosdns-x $LATEST_VERSION for linux-$arch..."
-    
-    # 检查 unzip 命令是否存在
-    if ! command -v unzip &> /dev/null; then
-        log_error "unzip 命令未找到，正在尝试安装..."
-        local os=$(detect_os)
-        case $os in
-            ubuntu|debian)
-                apt install -y unzip
-                ;;
-            centos|rhel|fedora|almalinux)
-                if command -v dnf &> /dev/null; then
-                    dnf install -y unzip
-                else
-                    yum install -y unzip
-                fi
-                ;;
-            arch|manjaro)
-                pacman -S --noconfirm unzip
-                ;;
-            *)
-                log_error "请手动安装 unzip 命令后重试"
-                exit 1
-                ;;
-        esac
-    fi
-    
-    # 创建临时目录
     local temp_dir=$(mktemp -d)
-    cd "$temp_dir"
     
-    # 下载文件
-    if ! wget -q --show-progress "$download_url" -O "mosdns-linux-$arch.zip"; then
-        log_error "下载失败，请检查网络连接"
+    log_info "Downloading mosdns-x $LATEST_VERSION for linux-$arch..."
+    
+    if ! wget -q --show-progress "$download_url" -O "$temp_dir/mosdns.zip"; then
+        log_error "Download failed. Please check your network connection."
         rm -rf "$temp_dir"
         exit 1
     fi
     
-    # 解压文件
-    unzip -q "mosdns-linux-$arch.zip"
+    log_info "Unpacking files..."
+    unzip -q "$temp_dir/mosdns.zip" -d "$temp_dir"
     
-    # 移动二进制文件到目标目录
-    chmod +x mosdns
-    mv mosdns "$INSTALL_DIR/"
+    log_info "Installing mosdns binary to $INSTALL_DIR..."
+    mv "$temp_dir/mosdns" "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/mosdns"
     
-    log_success "mosdns-x 二进制文件安装完成"
+    log_success "mosdns binary installed successfully."
     
-    # 清理临时文件
     rm -rf "$temp_dir"
 }
 
-# 创建配置目录和基本配置文件
 create_config() {
-    log_info "创建配置目录和基本配置文件..."
+    log_info "Creating configuration directory and default config file..."
     
-    # 创建配置目录
     mkdir -p "$CONFIG_DIR"
     
-    # 创建基本配置文件
     cat > "$CONFIG_DIR/config.yaml" << 'EOF'
+# Default configuration for mosdns-x
+# For more details, visit: https://github.com/pmkol/mosdns-x/wiki
+
 log:
   level: info
   file: "/var/log/mosdns.log"
@@ -193,21 +185,32 @@ log:
 include: []
 
 plugins:
-  # 缓存
+  # DNS cache to improve query speed.
   - tag: cache
     type: cache
     args:
       size: 8192
 
-  # DNS上游
+  # Forward DNS queries to upstream servers.
+  # This list includes modern encrypted DNS protocols (QUIC, TLS)
+  # for better privacy and security, with standard DNS as a fallback.
   - tag: forward
     type: fast_forward
     args:
       upstream:
+        # DNS-over-QUIC (fastest and most secure)
+        - addr: "quic://dns.google"
+        - addr: "quic://1.1.1.1"
+
+        # DNS-over-TLS (secure)
+        - addr: "tls://dns.google"
+        - addr: "tls://1.1.1.1"
+        
+        # Standard DNS (fallback)
         - addr: "8.8.8.8"
         - addr: "1.1.1.1"
 
-  # 主序列
+  # Main execution sequence.
   - tag: main_sequence
     type: sequence
     args:
@@ -216,6 +219,7 @@ plugins:
         - forward
 
 servers:
+  # Listen for incoming DNS queries on port 53 for both UDP and TCP.
   - exec: main_sequence
     listeners:
       - protocol: udp
@@ -224,14 +228,13 @@ servers:
         addr: "0.0.0.0:53"
 EOF
 
-    log_success "基本配置文件创建完成"
+    log_success "Default configuration file created at ${CYAN}$CONFIG_DIR/config.yaml${NC}"
 }
 
-# 创建系统服务文件
 create_systemd_service() {
-    log_info "创建 systemd 服务文件..."
+    log_info "Creating systemd service file..."
     
-    cat > "/etc/systemd/system/mosdns.service" << EOF
+    cat > "/etc/systemd/system/$SERVICE_NAME.service" << EOF
 [Unit]
 Description=Mosdns-x DNS Server
 After=network.target
@@ -240,10 +243,11 @@ Wants=network.target
 [Service]
 Type=simple
 User=root
+Group=root
 WorkingDirectory=$CONFIG_DIR
 ExecStart=$INSTALL_DIR/mosdns start -c $CONFIG_DIR/config.yaml -d $CONFIG_DIR
 ExecReload=/bin/kill -HUP \$MAINPID
-Restart=always
+Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
 
@@ -252,146 +256,130 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    log_success "systemd 服务文件创建完成"
+    log_success "Systemd service file created and reloaded."
 }
 
-# 启动服务
 start_service() {
-    log_info "启动 mosdns 服务..."
+    log_info "Starting and enabling mosdns service..."
     
-    systemctl enable mosdns
-    systemctl start mosdns
+    systemctl enable "$SERVICE_NAME" > /dev/null 2>&1
+    systemctl start "$SERVICE_NAME"
     
-    # 检查服务状态
     sleep 3
-    if systemctl is-active --quiet mosdns; then
-        log_success "mosdns 服务启动成功"
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        log_success "Mosdns service is active and running."
     else
-        log_error "mosdns 服务启动失败"
-        log_info "请检查配置文件或运行: journalctl -u mosdns -f"
+        log_error "Mosdns service failed to start."
+        log_info "Run ${CYAN}journalctl -u $SERVICE_NAME -f${NC} for detailed logs."
         exit 1
     fi
 }
 
-# 配置防火墙
 configure_firewall() {
-    log_info "配置防火墙规则..."
+    log_info "Attempting to configure firewall rules for DNS (port 53)..."
     
-    # 检查并配置 ufw (Ubuntu/Debian)
     if command -v ufw &> /dev/null; then
-        ufw allow 53/udp
-        ufw allow 53/tcp
-        log_success "ufw 防火墙规则已配置"
-    fi
-    
-    # 检查并配置 firewalld (CentOS/RHEL/Fedora)
-    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-port=53/udp
-        firewall-cmd --permanent --add-port=53/tcp
-        firewall-cmd --reload
-        log_success "firewalld 防火墙规则已配置"
-    fi
-    
-    # 检查并配置 iptables
-    if command -v iptables &> /dev/null && ! command -v ufw &> /dev/null && ! systemctl is-active --quiet firewalld; then
-        iptables -A INPUT -p udp --dport 53 -j ACCEPT
+        ufw allow 53/tcp > /dev/null
+        ufw allow 53/udp > /dev/null
+        log_success "UFW firewall rules for port 53 (TCP/UDP) have been added."
+    elif command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
+        firewall-cmd --permanent --add-port=53/tcp > /dev/null
+        firewall-cmd --permanent --add-port=53/udp > /dev/null
+        firewall-cmd --reload > /dev/null
+        log_success "Firewalld rules for port 53 (TCP/UDP) have been added."
+    elif command -v iptables &> /dev/null; then
         iptables -A INPUT -p tcp --dport 53 -j ACCEPT
-        log_success "iptables 防火墙规则已配置"
-        log_warning "请注意保存 iptables 规则以确保重启后生效"
+        iptables -A INPUT -p udp --dport 53 -j ACCEPT
+        log_success "Iptables rules for port 53 (TCP/UDP) have been added."
+        log_warning "Please ensure your iptables rules are saved to persist after a reboot."
+    else
+        log_warning "Could not detect a common firewall service. Please open port 53 (TCP/UDP) manually."
     fi
 }
 
-# 显示安装后信息
 show_completion_info() {
     echo
-    log_success "mosdns-x 安装完成！"
+    echo -e "${GREEN}===================================================${NC}"
+    echo -e "${GREEN}      🎉 Mosdns-x Installation Complete! 🎉      ${NC}"
+    echo -e "${GREEN}===================================================${NC}"
     echo
-    echo "=========================================="
-    echo -e "${GREEN}安装信息:${NC}"
-    echo "  二进制文件: $INSTALL_DIR/mosdns"
-    echo "  配置目录: $CONFIG_DIR"
-    echo "  配置文件: $CONFIG_DIR/config.yaml"
-    echo "  日志文件: /var/log/mosdns.log"
+    echo -e "${CYAN}--- Key Information ---${NC}"
+    echo -e "  ${YELLOW}Version Installed:${NC} $LATEST_VERSION"
+    echo -e "  ${YELLOW}Binary Location:${NC}   $INSTALL_DIR/mosdns"
+    echo -e "  ${YELLOW}Configuration Dir:${NC} $CONFIG_DIR"
+    echo -e "  ${YELLOW}Log File:${NC}          /var/log/mosdns.log"
     echo
-    echo -e "${GREEN}常用命令:${NC}"
-    echo "  启动服务: systemctl start mosdns"
-    echo "  停止服务: systemctl stop mosdns"
-    echo "  重启服务: systemctl restart mosdns"
-    echo "  查看状态: systemctl status mosdns"
-    echo "  查看日志: journalctl -u mosdns -f"
-    echo "  测试DNS: nslookup google.com 127.0.0.1"
+    echo -e "${CYAN}--- Service Commands ---${NC}"
+    echo -e "  ${YELLOW}Start Service:${NC}     systemctl start $SERVICE_NAME"
+    echo -e "  ${YELLOW}Stop Service:${NC}      systemctl stop $SERVICE_NAME"
+    echo -e "  ${YELLOW}Restart Service:${NC}   systemctl restart $SERVICE_NAME"
+    echo -e "  ${YELLOW}Reload Config:${NC}     systemctl reload $SERVICE_NAME"
+    echo -e "  ${YELLOW}Check Status:${NC}      systemctl status $SERVICE_NAME"
+    echo -e "  ${YELLOW}View Logs:${NC}         journalctl -u $SERVICE_NAME -f"
     echo
-    echo -e "${GREEN}配置文件:${NC}"
-    echo "  编辑配置: nano $CONFIG_DIR/config.yaml"
-    echo "  重载配置: systemctl reload mosdns"
+    echo -e "${CYAN}--- How to Use ---${NC}"
+    echo -e "  To use mosdns, set your system or router's DNS server to this machine's IP address."
+    echo -e "  You can test locally with: ${PURPLE}nslookup google.com 127.0.0.1${NC}"
     echo
-    echo -e "${GREEN}版本信息:${NC}"
-    echo "  当前版本: $LATEST_VERSION"
-    echo "  检查版本: $INSTALL_DIR/mosdns version"
+    echo -e "${YELLOW}To customize, edit ${CYAN}$CONFIG_DIR/config.yaml${YELLOW} and restart/reload the service.${NC}"
     echo
-    echo -e "${YELLOW}注意事项:${NC}"
-    echo "  1. 默认监听 53 端口，请确保没有其他DNS服务占用"
-    echo "  2. 可根据需要修改配置文件 $CONFIG_DIR/config.yaml"
-    echo "  3. 配置文件详细说明请参考: https://github.com/pmkol/mosdns-x/wiki"
-    echo "=========================================="
 }
 
-# 卸载功能
+# --- Uninstall Function ---
+
 uninstall() {
-    log_info "卸载 mosdns-x..."
+    log_info "Starting uninstallation of mosdns-x..."
+    check_root
     
-    # 停止并禁用服务
-    if systemctl is-active --quiet mosdns; then
-        systemctl stop mosdns
+    if ! [[ -f "$INSTALL_DIR/mosdns" || -f "/etc/systemd/system/$SERVICE_NAME.service" ]]; then
+        log_error "Mosdns does not appear to be installed. Aborting."
+        exit 1
     fi
+
+    log_info "Stopping and disabling the service..."
+    systemctl stop "$SERVICE_NAME" > /dev/null 2>&1 || true
+    systemctl disable "$SERVICE_NAME" > /dev/null 2>&1 || true
     
-    if systemctl is-enabled --quiet mosdns 2>/dev/null; then
-        systemctl disable mosdns
-    fi
-    
-    # 删除服务文件
-    rm -f /etc/systemd/system/mosdns.service
-    systemctl daemon-reload
-    
-    # 删除二进制文件
+    log_info "Removing files..."
+    rm -f "/etc/systemd/system/$SERVICE_NAME.service"
     rm -f "$INSTALL_DIR/mosdns"
     
-    # 询问是否删除配置文件
-    read -p "是否删除配置文件? [y/N]: " -n 1 -r
+    systemctl daemon-reload
+    
+    read -p "Do you want to remove the configuration directory ($CONFIG_DIR)? [y/N]: " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         rm -rf "$CONFIG_DIR"
         rm -f /var/log/mosdns.log
-        log_success "配置文件已删除"
+        log_success "Configuration directory and log file removed."
     fi
     
-    log_success "mosdns-x 卸载完成"
+    log_success "Mosdns-x uninstallation complete."
 }
 
-# 显示帮助信息
+# --- Help Function ---
+
 show_help() {
-    echo "Mosdns-x 一键安装脚本"
+    echo "Mosdns-x One-Click Management Script"
     echo
-    echo "用法:"
-    echo "  $0 [选项]"
+    echo "Usage: $0 [command]"
     echo
-    echo "选项:"
-    echo "  install     安装 mosdns-x (默认)"
-    echo "  uninstall   卸载 mosdns-x"
-    echo "  help        显示此帮助信息"
+    echo "Commands:"
+    echo "  install      (Default) Install or reinstall mosdns-x."
+    echo "  uninstall    Remove mosdns-x from the system."
+    echo "  help         Display this help message."
     echo
-    echo "示例:"
-    echo "  $0                 # 安装 mosdns-x"
-    echo "  $0 install         # 安装 mosdns-x" 
-    echo "  $0 uninstall       # 卸载 mosdns-x"
+    echo "Example: sudo ./$0 install"
 }
 
-# 主函数
+# --- Main Execution Logic ---
+
 main() {
     case "${1:-install}" in
         install)
-            log_info "开始安装 mosdns-x..."
+            show_banner
             check_root
+            check_existing_install
             install_dependencies
             get_latest_version
             download_mosdns
@@ -402,19 +390,18 @@ main() {
             show_completion_info
             ;;
         uninstall)
-            check_root
             uninstall
             ;;
         help|--help|-h)
             show_help
             ;;
         *)
-            log_error "未知选项: $1"
+            log_error "Unknown command: $1"
             show_help
             exit 1
             ;;
     esac
 }
 
-# 执行主函数
+# Run the main function with all script arguments
 main "$@"
