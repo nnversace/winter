@@ -1,5 +1,5 @@
 #!/bin/bash
-# 网络性能优化模块 v4.7 - 修复版
+# 网络性能优化模块
 # BBR + fq_codel + TFO + MPTCP优化
 
 set -euo pipefail
@@ -54,17 +54,25 @@ check_mptcp_param() {
 
 # === 配置函数 ===
 backup_configs() {
-    if [[ -f "$SYSCTL_CONFIG" ]]; then
-        [[ ! -f "$SYSCTL_CONFIG.original" ]] && cp "$SYSCTL_CONFIG" "$SYSCTL_CONFIG.original"
-        cp "$SYSCTL_CONFIG" "$SYSCTL_CONFIG.backup"
-        log "已备份 sysctl 配置" "info"
+    # 修复：确保配置文件存在，如果不存在则创建
+    if [[ ! -f "$SYSCTL_CONFIG" ]]; then
+        log "文件 $SYSCTL_CONFIG 不存在，将创建新文件。" "info"
+        touch "$SYSCTL_CONFIG"
     fi
     
-    if [[ -f "$LIMITS_CONFIG" ]]; then
-        [[ ! -f "$LIMITS_CONFIG.original" ]] && cp "$LIMITS_CONFIG" "$LIMITS_CONFIG.original"
-        cp "$LIMITS_CONFIG" "$LIMITS_CONFIG.backup"
-        log "已备份 limits 配置" "info"
+    if [[ ! -f "$LIMITS_CONFIG" ]]; then
+        log "文件 $LIMITS_CONFIG 不存在，将创建新文件。" "info"
+        touch "$LIMITS_CONFIG"
     fi
+
+    # 原始备份逻辑
+    [[ ! -f "$SYSCTL_CONFIG.original" ]] && cp "$SYSCTL_CONFIG" "$SYSCTL_CONFIG.original"
+    cp "$SYSCTL_CONFIG" "$SYSCTL_CONFIG.backup"
+    log "已备份 sysctl 配置" "info"
+    
+    [[ ! -f "$LIMITS_CONFIG.original" ]] && cp "$LIMITS_CONFIG" "$LIMITS_CONFIG.original"
+    cp "$LIMITS_CONFIG" "$LIMITS_CONFIG.backup"
+    log "已备份 limits 配置" "info"
 }
 
 configure_mptcp_params() {
@@ -179,12 +187,12 @@ configure_system_limits() {
     sed -i '/^# End of file/,$d' "$LIMITS_CONFIG"
     cat >> "$LIMITS_CONFIG" << 'EOF'
 # End of file
-*     soft   nofile    1048576
-*     hard   nofile    1048576
-*     soft   nproc     1048576
-*     hard   nproc     1048576
-*     hard   memlock   unlimited
-*     soft   memlock   unlimited
+* soft   nofile    1048576
+* hard   nofile    1048576
+* soft   nproc     1048576
+* hard   nproc     1048576
+* hard   memlock   unlimited
+* soft   memlock   unlimited
 
 root     soft   nofile    1048576
 root     hard   nofile    1048576
@@ -239,7 +247,7 @@ configure_network_parameters() {
     cat >> "$SYSCTL_CONFIG" << EOF
 
 # === 网络性能优化配置开始 ===
-# 网络性能优化模块 v4.7 - $(date +"%Y-%m-%d %H:%M")
+# 网络性能优化模块 - $(date +"%Y-%m-%d %H:%M")
 # BBR + fq_codel + TFO + MPTCP($MPTCP_SUPPORTED_COUNT/$MPTCP_TOTAL_COUNT)
 
 # 文件系统优化
@@ -523,7 +531,7 @@ setup_network_optimization() {
 }
 
 main() {
-    log "🚀 网络性能优化模块 v4.7" "info"
+    log "🚀 网络性能优化模块" "info"
     
     setup_network_optimization
     show_network_summary
