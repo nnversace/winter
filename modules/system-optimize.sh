@@ -1,9 +1,9 @@
 #!/bin/bash
 #
 # =================================================================
-# System Optimization & Security Hardening Script v8.0
+# System Optimization & Security Hardening Script
 #
-# Changelog v8.0:
+# Changelog:
 # - [FIX] Reworked network module to use /etc/sysctl.d/ and /etc/security/limits.d/
 #   for full compatibility with modern systems (e.g., Debian 12/13) where
 #   main config files may not exist by default.
@@ -29,7 +29,6 @@
 set -eo pipefail
 
 # --- 全局常量 ---
-# OPTIMIZED: Use dedicated .d directories for custom configs. This is the modern, safe way.
 readonly SYSCTL_CUSTOM_CONFIG="/etc/sysctl.d/99-system-harden.conf"
 readonly LIMITS_CUSTOM_CONFIG="/etc/security/limits.d/99-system-harden.conf"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
@@ -73,8 +72,6 @@ backup_file() {
 apply_network_optimizations() {
     info "--- 开始应用网络性能优化 ---"
     
-    # OPTIMIZED: Write to our own limits.d file instead of modifying the main file.
-    # This is idempotent and won't create duplicate entries.
     info "正在配置系统资源限制 (${LIMITS_CUSTOM_CONFIG})..."
     mkdir -p "$(dirname "$LIMITS_CUSTOM_CONFIG")"
     cat > "$LIMITS_CUSTOM_CONFIG" << 'EOF'
@@ -85,8 +82,6 @@ root soft nofile 1048576
 root hard nofile 1048576
 EOF
     
-    # OPTIMIZED: Write to our own sysctl.d file. This is the core fix for Debian 13.
-    # This is also idempotent and safer.
     info "正在配置 sysctl 网络参数 (${SYSCTL_CUSTOM_CONFIG})..."
     mkdir -p "$(dirname "$SYSCTL_CUSTOM_CONFIG")"
     cat > "$SYSCTL_CUSTOM_CONFIG" << EOF
@@ -110,7 +105,6 @@ EOF
 
 revert_network_changes() {
     info "--- 正在恢复网络配置 ---"
-    # OPTIMIZED: Reverting is now as simple as removing our own config files.
     if rm -f "$SYSCTL_CUSTOM_CONFIG"; then
         sysctl --system >/dev/null 2>&1
         success "自定义 sysctl 配置已移除。"
@@ -141,14 +135,10 @@ show_network_status() {
 # SSH 安全加固模块
 # =================================================
 
-# OPTIMIZED: A more robust function to set SSH config values.
-# It removes any existing (commented or uncommented) line and appends the new one.
 set_ssh_config() {
     local key="$1" value="$2"
     info "设置 SSH: $key -> $value"
-    # Remove any existing line with this key, including commented ones
     sed -i -E "/^[#\s]*${key}\s+/d" "$SSH_CONFIG"
-    # Append the new correct line
     echo "${key} ${value}" >> "$SSH_CONFIG"
 }
 
@@ -195,7 +185,6 @@ revert_ssh_changes() {
 }
 
 show_ssh_status() {
-    # Function to safely grep values from sshd_config
     get_ssh_config() { sshd -T | grep -i "^${1}" | awk '{print $2}'; }
     
     info "--- SSH 安全状态检查 (基于当前运行配置) ---"
@@ -213,7 +202,6 @@ show_ssh_status() {
 # 系统优化模块 (ZRAM, Time)
 # =================================================
 
-# OPTIMIZED: Configure ZRAM using the standard zram-tools package config.
 setup_zram() {
     info "--- 开始配置智能 ZRAM ---"
     if ! command -v zramctl &>/dev/null; then
@@ -223,13 +211,11 @@ setup_zram() {
     fi
     
     local mem_total_kb; mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    # ZRAM size = 50% of RAM, but no more than 8GB
     local zram_size_mb; zram_size_mb=$((mem_total_kb / 1024 / 2))
     [[ $zram_size_mb -gt 8192 ]] && zram_size_mb=8192
 
     info "物理内存: $((mem_total_kb / 1024))MB。将配置 ${zram_size_mb}MB ZRAM。"
     
-    # Configure via /etc/default/zramswap
     {
         echo "# Configured by system-harden.sh"
         echo "ALGO=zstd"
@@ -237,10 +223,9 @@ setup_zram() {
         echo "PRIORITY=100"
     } > /etc/default/zramswap
     
-    info "正在重启 zramswap 服务以应用配置..."
-    systemctl restart zramswap
+    info "正在重启 zram-config 服务以应用配置..."
+    systemctl restart zram-config
     
-    # Set swappiness
     echo "vm.swappiness = 80" > /etc/sysctl.d/99-zram.conf
     sysctl -p /etc/sysctl.d/99-zram.conf >/dev/null
     
@@ -266,7 +251,7 @@ revert_system_changes() {
     info "--- 正在恢复系统优化配置 ---"
     if command -v zramctl &>/dev/null; then
         info "正在卸载 zram-tools 并清理配置..."
-        systemctl stop zramswap 2>/dev/null || true
+        systemctl stop zram-config 2>/dev/null || true
         DEBIAN_FRONTEND=noninteractive apt-get purge -y zram-tools >/dev/null
     fi
     rm -f /etc/sysctl.d/99-zram.conf
