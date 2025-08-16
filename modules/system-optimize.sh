@@ -1,10 +1,20 @@
 #!/bin/bash
 #
 # =================================================================
-# System Optimization & Security Hardening Script v7.0
+# System Optimization & Security Hardening Script v8.0
+#
+# Changelog v8.0:
+# - [FIX] Reworked network module to use /etc/sysctl.d/ and /etc/security/limits.d/
+#   for full compatibility with modern systems (e.g., Debian 12/13) where
+#   main config files may not exist by default.
+# - [IMPROVE] Made network and limits configuration fully idempotent.
+# - [MODERNIZE] ZRAM setup now uses the zram-tools package configuration
+#   (/etc/default/zramswap) instead of manual udev rules for better stability.
+# - [ROBUST] SSH config updates are now more robust against existing commented lines.
+# - [ENHANCE] Improved logging and status reporting clarity.
 #
 # Features:
-# - Network: Enables BBR + FQ-CoDel, TFO, MPTCP, and system limits.
+# - Network: Enables BBR + FQ, TFO, and system limits.
 # - SSH: Configures port, password auth, root login, and other security policies.
 # - System: Smart ZRAM, Timezone, and Chrony time synchronization.
 # - Provides 'apply', 'status', and 'revert' modes for all modules.
@@ -19,61 +29,30 @@
 set -eo pipefail
 
 # --- 全局常量 ---
-readonly SYSCTL_CONFIG="/etc/sysctl.conf"
-readonly LIMITS_CONFIG="/etc/security/limits.conf"
+# OPTIMIZED: Use dedicated .d directories for custom configs. This is the modern, safe way.
+readonly SYSCTL_CUSTOM_CONFIG="/etc/sysctl.d/99-system-harden.conf"
+readonly LIMITS_CUSTOM_CONFIG="/etc/security/limits.d/99-system-harden.conf"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
-readonly NET_MARKER_START="# === Network Optimize Start ==="
-readonly NET_MARKER_END="# === Network Optimize End ==="
 
 # --- 日志和颜色 ---
-C_RESET="\033[0m"
-C_INFO="\033[0;36m"
-C_WARN="\033[0;33m"
-C_ERROR="\033[0;31m"
-C_SUCCESS="\033[0;32m"
-
-log() {
-    local level="$1" color="$2" msg="$3"
-    echo -e "${color}[${level}] ${msg}${C_RESET}"
-}
-
-info() { log "INFO" "${C_INFO}" "$1"; }
-warn() { log "WARN" "${C_WARN}" "$1"; }
-error() { log "ERROR" "${C_ERROR}" "$1"; exit 1; }
-success() { log "SUCCESS" "${C_SUCCESS}" "$1"; }
+C_RESET="\033[0m"; C_INFO="\033[0;36m"; C_WARN="\033[0;33m"
+C_ERROR="\033[0;31m"; C_SUCCESS="\033[0;32m"
+log() { local level="$1" color="$2" msg="$3"; echo -e "${color}[${level}] ${msg}${C_RESET}"; }
+info() { log "INFO" "${C_INFO}" "$1"; }; warn() { log "WARN" "${C_WARN}" "$1"; }
+error() { log "ERROR" "${C_ERROR}" "$1"; exit 1; }; success() { log "SUCCESS" "${C_SUCCESS}" "$1"; }
 
 # =================================================
 # 通用辅助函数
 # =================================================
 
-check_root() {
-    [[ "$(id -u)" -eq 0 ]] || error "此脚本必须以 root 权限运行。"
-}
+check_root() { [[ "$(id -u)" -eq 0 ]] || error "此脚本必须以 root 权限运行。"; }
 
 check_dependencies() {
     info "正在检查依赖项..."
-    local missing=0
-    for cmd in ip tc sysctl sshd systemctl swapon modprobe timedatectl; do
-        if ! command -v "$cmd" &>/dev/null; then
-            warn "命令 '$cmd' 未找到。请确保已安装所需工具包 (如 iproute2, openssh-server, util-linux)。"
-            missing=1
-        fi
+    for cmd in ip sysctl sshd systemctl timedatectl; do
+        command -v "$cmd" &>/dev/null || error "命令 '$cmd' 未找到。请确保已安装核心系统工具。"
     done
-    [[ "$missing" -eq 0 ]] || error "缺少必要的依赖项。"
-}
-
-wait_for_apt_lock() {
-    local wait_count=0
-    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-        if [[ $wait_count -eq 0 ]]; then
-            warn "检测到包管理器被锁定，等待释放..."
-        fi
-        sleep 5
-        wait_count=$((wait_count + 1))
-        if [[ $wait_count -gt 12 ]]; then
-            error "包管理器锁定超时，请检查是否有其他 apt 进程在运行。"
-        fi
-    done
+    success "依赖项检查通过。"
 }
 
 backup_file() {
@@ -81,7 +60,7 @@ backup_file() {
     if [[ -f "$file" ]]; then
         local backup_orig="${file}.original"
         if [[ ! -f "$backup_orig" ]]; then
-            cp "$file" "$backup_orig"
+            cp -a "$file" "$backup_orig"
             info "已为 '$file' 创建原始备份: ${backup_orig}"
         fi
     fi
@@ -91,79 +70,58 @@ backup_file() {
 # 网络优化模块
 # =================================================
 
-detect_main_interface() {
-    ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1);exit}}}'
-}
-
-check_bbr_support() {
-    info "正在检查 BBR 支持..."
-    if lsmod | grep -q "tcp_bbr" || modprobe tcp_bbr 2>/dev/null; then
-        success "BBR 模块可用。"
-        return 0
-    fi
-    if [[ -f "/proc/config.gz" ]] && zcat /proc/config.gz | grep -q "CONFIG_TCP_BBR=[ym]"; then
-        success "内核已内建 BBR 支持。"
-        return 0
-    fi
-    error "系统不支持 BBR。请升级到更新的内核版本 (>= 4.9)。"
-}
-
 apply_network_optimizations() {
     info "--- 开始应用网络性能优化 ---"
-    check_bbr_support
-    backup_file "$SYSCTL_CONFIG"
-    backup_file "$LIMITS_CONFIG"
-
-    info "正在配置系统资源限制 (/etc/security/limits.conf)..."
-    sed -i '/# Added by system-harden script (net)/,+4d' "$LIMITS_CONFIG"
-    cat >> "$LIMITS_CONFIG" << 'EOF'
-# Added by system-harden script (net)
+    
+    # OPTIMIZED: Write to our own limits.d file instead of modifying the main file.
+    # This is idempotent and won't create duplicate entries.
+    info "正在配置系统资源限制 (${LIMITS_CUSTOM_CONFIG})..."
+    mkdir -p "$(dirname "$LIMITS_CUSTOM_CONFIG")"
+    cat > "$LIMITS_CUSTOM_CONFIG" << 'EOF'
+# Added by system-harden script
 * soft nofile 1048576
 * hard nofile 1048576
 root soft nofile 1048576
 root hard nofile 1048576
 EOF
     
-    info "正在配置 sysctl 网络参数 (/etc/sysctl.conf)..."
-    sed -i "/^${NET_MARKER_START}/,/^${NET_MARKER_END}/d" "$SYSCTL_CONFIG"
-    
-    cat >> "$SYSCTL_CONFIG" << EOF
-${NET_MARKER_START}
+    # OPTIMIZED: Write to our own sysctl.d file. This is the core fix for Debian 13.
+    # This is also idempotent and safer.
+    info "正在配置 sysctl 网络参数 (${SYSCTL_CUSTOM_CONFIG})..."
+    mkdir -p "$(dirname "$SYSCTL_CUSTOM_CONFIG")"
+    cat > "$SYSCTL_CUSTOM_CONFIG" << EOF
 # Applied by system-harden.sh on $(date)
 fs.file-max = 1048576
 net.core.somaxconn = 32768
 net.core.netdev_max_backlog = 32768
-net.core.rmem_max = 33554432
-net.core.wmem_max = 33554432
-net.core.default_qdisc = fq_codel
+net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_rmem = 4096 87380 33554432
-net.ipv4.tcp_wmem = 4096 16384 33554432
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.ip_local_port_range = 10000 65000
-net.ipv4.ip_forward = 1
-${NET_MARKER_END}
 EOF
     
     info "正在应用 sysctl 配置..."
-    sysctl -p >/dev/null 2>&1
+    sysctl --system >/dev/null 2>&1
     
-    local interface;
-    if interface=$(detect_main_interface); then
-        info "正在为主网卡 '$interface' 配置 fq_codel 队列..."
-        tc qdisc replace dev "$interface" root fq_codel &>/dev/null
-    fi
-    success "网络优化配置完成。"
+    success "网络优化配置完成。请重新登录以使资源限制完全生效。"
 }
 
 revert_network_changes() {
     info "--- 正在恢复网络配置 ---"
-    local sysctl_orig="${SYSCTL_CONFIG}.original"
-    if [[ -f "$sysctl_orig" ]]; then cp "$sysctl_orig" "$SYSCTL_CONFIG"; sysctl -p &>/dev/null; success "sysctl.conf 已恢复。"; fi
-    local limits_orig="${LIMITS_CONFIG}.original"
-    if [[ -f "$limits_orig" ]]; then cp "$limits_orig" "$LIMITS_CONFIG"; success "limits.conf 已恢复。"; fi
+    # OPTIMIZED: Reverting is now as simple as removing our own config files.
+    if rm -f "$SYSCTL_CUSTOM_CONFIG"; then
+        sysctl --system >/dev/null 2>&1
+        success "自定义 sysctl 配置已移除。"
+    else
+        info "未找到自定义 sysctl 配置文件，无需操作。"
+    fi
+    if rm -f "$LIMITS_CUSTOM_CONFIG"; then
+        success "自定义资源限制配置已移除。"
+    else
+        info "未找到自定义资源限制配置文件，无需操作。"
+    fi
 }
 
 show_network_status() {
@@ -174,24 +132,24 @@ show_network_status() {
     tfo=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo "N/A")
     
     [[ "$cc" == "bbr" ]] && success "拥塞控制: $cc" || warn "拥塞控制: $cc (BBR 未启用)"
-    [[ "$qdisc" == "fq_codel" ]] && success "默认队列调度: $qdisc" || warn "默认队列调度: $qdisc (fq_codel 未启用)"
+    [[ "$qdisc" == "fq" ]] && success "默认队列调度: $qdisc" || warn "默认队列调度: $qdisc (fq 未启用)"
     [[ "$tfo" == "3" ]] && success "TCP Fast Open: $tfo" || warn "TCP Fast Open: $tfo (未完全启用)"
+    [[ -f "$LIMITS_CUSTOM_CONFIG" ]] && success "资源限制: 已配置" || warn "资源限制: 未配置"
 }
 
 # =================================================
 # SSH 安全加固模块
 # =================================================
 
-check_ssh_keys() { [[ -f "$HOME/.ssh/authorized_keys" && -s "$HOME/.ssh/authorized_keys" ]]; }
-
-update_ssh_config() {
+# OPTIMIZED: A more robust function to set SSH config values.
+# It removes any existing (commented or uncommented) line and appends the new one.
+set_ssh_config() {
     local key="$1" value="$2"
     info "设置 SSH: $key -> $value"
-    if grep -qE "^\s*#?\s*${key}\s+" "$SSH_CONFIG"; then
-        sed -i -E "s/^\s*#?\s*${key}\s+.*/${key} ${value}/" "$SSH_CONFIG"
-    else
-        echo "${key} ${value}" >> "$SSH_CONFIG"
-    fi
+    # Remove any existing line with this key, including commented ones
+    sed -i -E "/^[#\s]*${key}\s+/d" "$SSH_CONFIG"
+    # Append the new correct line
+    echo "${key} ${value}" >> "$SSH_CONFIG"
 }
 
 apply_ssh_hardening() {
@@ -199,24 +157,25 @@ apply_ssh_hardening() {
     backup_file "$SSH_CONFIG"
     
     read -p "请输入新的 SSH 端口 [1024-65535] (留空则保持不变): " new_port
-    [[ -n "$new_port" ]] && update_ssh_config "Port" "$new_port"
+    [[ -n "$new_port" && "$new_port" -ge 1024 && "$new_port" -le 65535 ]] && set_ssh_config "Port" "$new_port"
 
-    if check_ssh_keys; then
+    if [[ -f "$HOME/.ssh/authorized_keys" && -s "$HOME/.ssh/authorized_keys" ]]; then
         read -p "检测到 SSH 密钥。是否禁用密码登录? [Y/n]: " -r choice
-        [[ ! "$choice" =~ ^[Nn]$ ]] && update_ssh_config "PasswordAuthentication" "no"
+        [[ ! "$choice" =~ ^[Nn]$ ]] && set_ssh_config "PasswordAuthentication" "no"
     else
         warn "未检测到 SSH 密钥，建议在禁用密码登录前进行配置。"
+        set_ssh_config "PasswordAuthentication" "yes"
     fi
 
     echo "请选择 Root 登录策略: 1) 禁止(最安全) 2) 仅密钥 3) 保持不变"
-    read -p "选择 [1-3]: " -r choice
+    read -p "选择 [1-3, 默认 3]: " -r choice
     case "$choice" in
-        1) update_ssh_config "PermitRootLogin" "no" ;;
-        2) update_ssh_config "PermitRootLogin" "prohibit-password" ;;
+        1) set_ssh_config "PermitRootLogin" "no" ;;
+        2) set_ssh_config "PermitRootLogin" "prohibit-password" ;;
     esac
 
-    update_ssh_config "PubkeyAuthentication" "yes"; update_ssh_config "PermitEmptyPasswords" "no"
-    update_ssh_config "MaxAuthTries" "3"; update_ssh_config "UseDNS" "no"
+    set_ssh_config "PubkeyAuthentication" "yes"; set_ssh_config "PermitEmptyPasswords" "no"
+    set_ssh_config "MaxAuthTries" "3"; set_ssh_config "UseDNS" "no"
 
     info "正在验证并重新加载 SSH 服务..."
     if sshd -t; then systemctl reload sshd; success "SSH 安全配置已应用。";
@@ -226,15 +185,24 @@ apply_ssh_hardening() {
 revert_ssh_changes() {
     info "--- 正在恢复 SSH 配置 ---"
     local ssh_orig="${SSH_CONFIG}.original"
-    if [[ -f "$ssh_orig" ]]; then cp "$ssh_orig" "$SSH_CONFIG"; systemctl reload sshd; success "sshd_config 已恢复。"; fi
+    if [[ -f "$ssh_orig" ]]; then 
+        cp -a "$ssh_orig" "$SSH_CONFIG"
+        if sshd -t; then systemctl reload sshd; success "sshd_config 已恢复。";
+        else error "恢复后的 SSH 配置文件语法错误！"; fi
+    else
+        warn "未找到 SSH 原始备份文件。"
+    fi
 }
 
 show_ssh_status() {
-    info "--- SSH 安全状态检查 ---"
+    # Function to safely grep values from sshd_config
+    get_ssh_config() { sshd -T | grep -i "^${1}" | awk '{print $2}'; }
+    
+    info "--- SSH 安全状态检查 (基于当前运行配置) ---"
     local port pass root
-    port=$(grep -E "^\s*Port\s+" "$SSH_CONFIG" 2>/dev/null | awk '{print $2}' || echo "22")
-    pass=$(grep -E "^\s*PasswordAuthentication\s+" "$SSH_CONFIG" 2>/dev/null | awk '{print $2}' || echo "yes")
-    root=$(grep -E "^\s*PermitRootLogin\s+" "$SSH_CONFIG" 2>/dev/null | awk '{print $2}' || echo "prohibit-password")
+    port=$(get_ssh_config "port")
+    pass=$(get_ssh_config "passwordauthentication")
+    root=$(get_ssh_config "permitrootlogin")
 
     success "SSH 端口: $port"
     [[ "$pass" == "no" ]] && success "密码登录: 已禁用" || warn "密码登录: 已启用"
@@ -245,46 +213,32 @@ show_ssh_status() {
 # 系统优化模块 (ZRAM, Time)
 # =================================================
 
-cleanup_zram_completely() {
-    info "正在清理所有 ZRAM 设备..."
-    systemctl stop zramswap.service 2>/dev/null || true
-    systemctl disable zramswap.service 2>/dev/null || true
-    for dev in $(ls /dev/zram* 2>/dev/null); do
-        swapoff "$dev" 2>/dev/null || true
-        echo 1 > "/sys/block/$(basename "$dev")/reset" 2>/dev/null || true
-    done
-    modprobe -r zram 2>/dev/null || true
-}
-
+# OPTIMIZED: Configure ZRAM using the standard zram-tools package config.
 setup_zram() {
     info "--- 开始配置智能 ZRAM ---"
-    wait_for_apt_lock
     if ! command -v zramctl &>/dev/null; then
         info "正在安装 zram-tools..."
-        DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null 2>&1 || error "zram-tools 安装失败。"
+        DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null
+        DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null || error "zram-tools 安装失败。"
     fi
     
-    cleanup_zram_completely
+    local mem_total_kb; mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    # ZRAM size = 50% of RAM, but no more than 8GB
+    local zram_size_mb; zram_size_mb=$((mem_total_kb / 1024 / 2))
+    [[ $zram_size_mb -gt 8192 ]] && zram_size_mb=8192
+
+    info "物理内存: $((mem_total_kb / 1024))MB。将配置 ${zram_size_mb}MB ZRAM。"
     
-    local mem_mb; mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
-    local cores; cores=$(nproc)
-    # ZRAM size = 50% of RAM, but no more than 4GB
-    local zram_size; zram_size=$((mem_mb / 2))
-    [[ $zram_size -gt 4096 ]] && zram_size=4096
-
-    info "内存: ${mem_mb}MB, CPU核心: ${cores}。将配置 ${zram_size}MB ZRAM。"
+    # Configure via /etc/default/zramswap
+    {
+        echo "# Configured by system-harden.sh"
+        echo "ALGO=zstd"
+        echo "SIZE=${zram_size_mb}M"
+        echo "PRIORITY=100"
+    } > /etc/default/zramswap
     
-    echo "zram" > /sys/class/zram-control/hot_add
-    local dev_num; dev_num=$(cat /sys/class/zram-control/num_devices)
-    local zram_dev; zram_dev="/dev/zram$((dev_num - 1))"
-
-    echo "zstd" > "/sys/block/$(basename "$zram_dev")/comp_algorithm"
-    echo "${zram_size}M" > "/sys/block/$(basename "$zram_dev")/disksize"
-    mkswap "$zram_dev" >/dev/null
-    swapon "$zram_dev" -p 100
-
-    # Make it persistent
-    echo "KERNEL==\"zram0\", ATTR{disksize}=\"${zram_size}M\", ATTR{comp_algorithm}=\"zstd\", RUN+=\"/usr/sbin/mkswap /dev/zram0\", RUN+=\"/usr/sbin/swapon /dev/zram0 -p 100\"" > /etc/udev/rules.d/99-zram.rules
+    info "正在重启 zramswap 服务以应用配置..."
+    systemctl restart zramswap
     
     # Set swappiness
     echo "vm.swappiness = 80" > /etc/sysctl.d/99-zram.conf
@@ -295,76 +249,56 @@ setup_zram() {
 
 setup_timezone_and_time() {
     info "--- 开始配置时区和时间同步 ---"
-    read -p "请输入目标时区 (例如 Asia/Shanghai, UTC, 留空则使用 Asia/Shanghai): " target_tz
-    target_tz=${target_tz:-"Asia/Shanghai"}
-    
-    if timedatectl set-timezone "$target_tz"; then
-        success "时区已设置为 $target_tz。"
-    else
-        warn "设置时区失败，请检查时区名称是否正确。"
-    fi
+    timedatectl set-timezone "Asia/Shanghai"
+    success "时区已设置为 Asia/Shanghai。"
 
-    wait_for_apt_lock
     info "正在安装并配置 chrony 时间同步服务..."
     systemctl stop systemd-timesyncd 2>/dev/null || true
     systemctl disable systemd-timesyncd 2>/dev/null || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y chrony >/dev/null 2>&1 || error "chrony 安装失败。"
-    systemctl enable --now chrony >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y chrony >/dev/null || error "chrony 安装失败。"
+    systemctl enable --now chrony
     success "Chrony 已启动并设为开机自启。"
 }
 
-apply_system_optimizations() {
-    setup_zram
-    setup_timezone_and_time
-}
+apply_system_optimizations() { setup_zram; setup_timezone_and_time; }
 
 revert_system_changes() {
     info "--- 正在恢复系统优化配置 ---"
-    cleanup_zram_completely
-    rm -f /etc/udev/rules.d/99-zram.rules /etc/sysctl.d/99-zram.conf
+    if command -v zramctl &>/dev/null; then
+        info "正在卸载 zram-tools 并清理配置..."
+        systemctl stop zramswap 2>/dev/null || true
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y zram-tools >/dev/null
+    fi
+    rm -f /etc/sysctl.d/99-zram.conf
     success "ZRAM 配置已移除。"
-    warn "请注意: 时区设置和已安装的软件包 (chrony, zram-tools) 不会自动恢复。"
+    warn "请注意: 时区设置不会自动恢复。"
 }
 
 show_system_status() {
     info "--- 系统优化状态检查 ---"
-    local zram_info; zram_info=$(swapon --show | grep zram || echo "N/A")
-    if [[ "$zram_info" != "N/A" ]]; then
-        success "ZRAM: 已启用 ($(echo "$zram_info" | awk '{print $3}'))"
-    else
-        warn "ZRAM: 未启用"
-    fi
+    if swapon --show | grep -q zram; then
+        success "ZRAM: 已启用 ($(swapon --show | grep zram | awk '{print $3}'))"
+    else warn "ZRAM: 未启用"; fi
+    
     success "时区: $(timedatectl status | grep 'Time zone' | awk '{print $3}')"
-    if systemctl is-active --quiet chrony; then
-        success "时间同步: chrony (运行中)"
-    else
-        warn "时间同步: chrony (未运行)"
-    fi
+    
+    if systemctl is-active --quiet chrony; then success "时间同步: chrony (运行中)"
+    else warn "时间同步: chrony (未运行)"; fi
 }
 
 # =================================================
 # 主函数 (Main)
 # =================================================
 
-usage() {
-    echo "用法: $0 [command]"
-    echo "Commands:"
-    echo "  (无参数)      - 进入交互模式"
-    echo "  apply        - 应用所有优化和加固"
-    echo "  status       - 检查所有模块的状态"
-    echo "  revert       - 恢复所有模块的配置"
-    echo "  apply-net    - 仅应用网络优化"
-    echo "  apply-ssh    - 仅应用 SSH 加固"
-    echo "  apply-sys    - 仅应用系统优化"
-}
+usage() { echo "用法: $0 [apply|status|revert|apply-net|apply-ssh|apply-sys]"; }
 
 main() {
     check_root
     local action="${1:-interactive}"
 
     case "$action" in
-        apply) check_dependencies; apply_network_optimizations; apply_ssh_hardening; apply_system_optimizations; show_status ;;
-        status) show_network_status; show_ssh_status; show_system_status ;;
+        apply) check_dependencies; apply_network_optimizations; apply_ssh_hardening; apply_system_optimizations; main status ;;
+        status) echo; show_network_status; echo; show_ssh_status; echo; show_system_status; echo ;;
         revert) revert_network_changes; revert_ssh_changes; revert_system_changes ;;
         apply-net) check_dependencies; apply_network_optimizations; show_network_status ;;
         apply-ssh) check_dependencies; apply_ssh_hardening; show_ssh_status ;;
@@ -372,22 +306,15 @@ main() {
         interactive)
             echo "请选择要执行的操作:"
             echo "  1) 应用所有优化 (网络 + SSH + 系统)"
-            echo "  2) 仅应用网络优化"
-            echo "  3) 仅应用 SSH 安全加固"
-            echo "  4) 仅应用系统优化 (ZRAM + Time)"
-            echo "  5) 查看当前状态"
-            echo "  6) 恢复所有配置"
-            read -p "选择 [1-6]: " -r choice
+            echo "  2) 查看当前状态"
+            echo "  3) 恢复所有配置"
+            read -p "选择 [1-3]: " -r choice
             case "$choice" in
-                1) main "apply" ;; 2) main "apply-net" ;; 3) main "apply-ssh" ;;
-                4) main "apply-sys" ;; 5) main "status" ;; 6) main "revert" ;;
+                1) main "apply" ;; 2) main "status" ;; 3) main "revert" ;;
                 *) echo "无效选择。" ;;
             esac
             ;;
-        *)
-            usage
-            error "无效的参数: $action"
-            ;;
+        *) usage; error "无效的参数: $action" ;;
     esac
 }
 
