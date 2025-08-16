@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #=============================================================================
-# Debian 系统一键部署脚本
+# Debian システム一鍵部署脚本
 #
 # 适用系统: Debian 12/13
 # 作者: LucaLin233 (由 Gemini-Pro 优化)
@@ -24,10 +24,9 @@ readonly TEMP_DIR="/tmp/debian-setup-modules"
 readonly LOG_FILE="/var/log/debian-setup.log"
 readonly SUMMARY_FILE="/root/deployment_summary.txt"
 
-#--- 模块定义 (新增 mosdns-x, kernel_optimization, network-optimize) ---
+#--- 模块定义 (移除了 kernel_optimization) ---
 declare -A MODULES=(
     ["system-optimize"]="基础系统优化 (Zram, 时区, 时间同步)"
-    ["kernel_optimization"]="内核参数优化 (BBR, TCP队列, 文件句柄)"
     ["tools-setup"]="常用工具集 (NextTrace, SpeedTest 等)"
     ["network-optimize"]="网络性能优化"
     ["ssh-security"]="SSH 安全加固 (修改端口, 禁用密码登录)"
@@ -36,13 +35,12 @@ declare -A MODULES=(
     ["auto-update-setup"]="配置系统自动更新"
 )
 
-#--- [优化] 模块执行顺序 ---
-# 1. 系统层优化 -> 2. 内核网络 -> 3. 安全配置 -> 4. 应用服务 -> 5. 维护任务
+#--- [优化] 模块执行顺序 (移除了 kernel_optimization) ---
+# 1. 系统层优化 -> 2. 网络 -> 3. 安全配置 -> 4. 应用服务 -> 5. 维护任务
 readonly ORDERED_MODULE_KEYS=(
     "system-optimize"
     "tools-setup"
     "network-optimize"
-    "kernel_optimization"
     "ssh-security"
     "mosdns-x"
     "docker-setup"
