@@ -1,334 +1,523 @@
 #!/bin/bash
-#
-# =================================================================
-# System Optimization & Security Hardening Script v6.0
-#
-# Features:
-# - Network: Enables BBR + FQ-CoDel, TFO, MPTCP, and system limits.
-# - SSH: Configures port, password auth, root login, and other security policies.
-# - Provides 'apply', 'status', and 'revert' modes for both modules.
-#
-# Usage:
-#   - Interactive: ./system-harden.sh
-#   - Apply all:   ./system-harden.sh apply
-#   - Show status: ./system-harden.sh status
-#   - Revert all:  ./system-harden.sh revert
-# =================================================================
+# SSH 安全配置模块 v5.1 - 智能安全版
+# 功能: SSH端口配置、密码认证控制、安全策略设置
 
-set -eo pipefail
+set -euo pipefail
 
-# --- 全局常量 ---
-readonly SYSCTL_CONFIG="/etc/sysctl.conf"
-readonly LIMITS_CONFIG="/etc/security/limits.conf"
+# === 常量定义 ===
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
-readonly NET_MARKER_START="# === Network Optimize Start ==="
-readonly NET_MARKER_END="# === Network Optimize End ==="
+readonly AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
 
-# --- 日志和颜色 ---
-C_RESET="\033[0m"
-C_INFO="\033[0;36m"
-C_WARN="\033[0;33m"
-C_ERROR="\033[0;31m"
-C_SUCCESS="\033[0;32m"
-
+# === 日志函数 ===
 log() {
-    local level="$1" color="$2" msg="$3"
-    echo -e "${color}[${level}] ${msg}${C_RESET}"
+    local msg="$1" level="${2:-info}"
+    local -A colors=([info]="\033[0;36m" [warn]="\033[0;33m" [error]="\033[0;31m" [debug]="\033[0;35m")
+    echo -e "${colors[$level]:-\033[0;32m}$msg\033[0m"
 }
 
-info() { log "INFO" "${C_INFO}" "$1"; }
-warn() { log "WARN" "${C_WARN}" "$1"; }
-error() { log "ERROR" "${C_ERROR}" "$1"; exit 1; }
-success() { log "SUCCESS" "${C_SUCCESS}" "$1"; }
-
-# =================================================
-# 通用辅助函数
-# =================================================
-
-check_root() {
-    [[ "$(id -u)" -eq 0 ]] || error "此脚本必须以 root 权限运行。"
+debug_log() {
+    if [[ "${DEBUG:-}" == "1" ]]; then
+        log "DEBUG: $1" "debug" >&2
+    fi
+    return 0
 }
 
-check_dependencies() {
-    info "正在检查依赖项..."
-    local missing=0
-    for cmd in ip tc sysctl sshd systemctl; do
-        if ! command -v "$cmd" &>/dev/null; then
-            warn "命令 '$cmd' 未找到。请确保已安装所需工具包 (如 iproute2, openssh-server)。"
-            missing=1
+# === 辅助函数 ===
+# 备份SSH配置
+backup_ssh_config() {
+    debug_log "开始备份SSH配置"
+    if [[ -f "$SSH_CONFIG" ]]; then
+        if cp "$SSH_CONFIG" "$SSH_CONFIG.backup.$(date +%s)" 2>/dev/null; then
+            debug_log "SSH配置已备份"
+            echo "SSH配置: 已备份"
+            return 0
+        else
+            log "SSH配置备份失败" "error"
+            return 1
         fi
-    done
-    [[ "$missing" -eq 0 ]] || error "缺少必要的依赖项。"
-}
-
-backup_file() {
-    local file="$1"
-    if [[ -f "$file" ]]; then
-        local backup_orig="${file}.original"
-        if [[ ! -f "$backup_orig" ]]; then
-            cp "$file" "$backup_orig"
-            info "已为 '$file' 创建原始备份: ${backup_orig}"
-        fi
+    else
+        log "SSH配置文件不存在" "error"
+        return 1
     fi
 }
 
-# =================================================
-# 网络优化模块
-# =================================================
-
-detect_main_interface() {
-    ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1);exit}}}'
+# 获取当前SSH端口
+get_current_ssh_ports() {
+    debug_log "获取当前SSH端口"
+    local ports
+    if ports=$(grep "^Port " "$SSH_CONFIG" 2>/dev/null | awk '{print $2}'); then
+        if [[ -n "$ports" ]]; then
+            echo "$ports" | tr '\n' ' ' | sed 's/ $//'
+        else
+            echo "22"
+        fi
+    else
+        echo "22"
+    fi
+    return 0
 }
 
-check_bbr_support() {
-    info "正在检查 BBR 支持..."
-    if lsmod | grep -q "tcp_bbr" || modprobe tcp_bbr 2>/dev/null; then
-        success "BBR 模块可用。"
+# 验证端口号
+validate_port() {
+    local port="$1"
+    local current_ports="${2:-}"
+    
+    debug_log "验证端口: $port, 当前端口: $current_ports"
+    
+    # 检查格式和范围
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1024 || port > 65535 )); then
+        debug_log "端口格式或范围无效: $port"
+        return 1
+    fi
+    
+    # 如果是当前SSH端口，允许通过
+    if [[ "$current_ports" == *"$port"* ]]; then
+        debug_log "端口是当前SSH端口，允许: $port"
         return 0
     fi
-    if [[ -f "/proc/config.gz" ]] && zcat /proc/config.gz | grep -q "CONFIG_TCP_BBR=[ym]"; then
-        success "内核已内建 BBR 支持。"
-        return 0
-    fi
-    error "系统不支持 BBR。请升级到更新的内核版本 (>= 4.9)。"
-}
-
-configure_mptcp() {
-    local mptcp_config_text=""
-    if [[ ! -f "/proc/sys/net/mptcp/enabled" ]]; then
-        warn "系统不支持 MPTCP，将跳过相关配置。"
-        echo -e "\n# MPTCP not supported on this system."
-        return
+    
+    # 检查是否被占用
+    if ss -tuln 2>/dev/null | grep -q ":$port\b"; then
+        debug_log "端口被占用: $port"
+        return 1
     fi
     
-    info "正在检测并配置 MPTCP 参数..."
-    declare -A mptcp_params=(
-        ["net.mptcp.enabled"]=1 ["net.mptcp.pm_type"]=0
-        ["net.mptcp.checksum_enabled"]=0 ["net.mptcp.scheduler"]="default"
-    )
-    mptcp_config_text+="\n# MPTCP Optimization"
-    for param in "${!mptcp_params[@]}"; do
-        [[ -f "/proc/sys/${param//./\/}" ]] && mptcp_config_text+="\n${param} = ${mptcp_params[$param]}"
-    done
-    echo "$mptcp_config_text"
+    debug_log "端口验证通过: $port"
+    return 0
 }
 
-apply_network_optimizations() {
-    info "--- 开始应用网络性能优化 ---"
-    check_bbr_support
-    backup_file "$SYSCTL_CONFIG"
-    backup_file "$LIMITS_CONFIG"
-
-    # 配置 limits.conf
-    info "正在配置系统资源限制 (/etc/security/limits.conf)..."
-    sed -i '/# Added by system-harden script/,+4d' "$LIMITS_CONFIG"
-    cat >> "$LIMITS_CONFIG" << 'EOF'
-# Added by system-harden script
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
-EOF
-    
-    # 配置 sysctl.conf
-    info "正在配置 sysctl 网络参数 (/etc/sysctl.conf)..."
-    sed -i "/^${NET_MARKER_START}/,/^${NET_MARKER_END}/d" "$SYSCTL_CONFIG"
-    local mptcp_settings; mptcp_settings=$(configure_mptcp)
-    
-    cat >> "$SYSCTL_CONFIG" << EOF
-${NET_MARKER_START}
-# Applied by system-harden.sh on $(date)
-fs.file-max = 1048576
-net.core.somaxconn = 32768
-net.core.netdev_max_backlog = 32768
-net.core.rmem_max = 33554432
-net.core.wmem_max = 33554432
-net.core.default_qdisc = fq_codel
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_rmem = 4096 87380 33554432
-net.ipv4.tcp_wmem = 4096 16384 33554432
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.ip_local_port_range = 10000 65000
-net.ipv4.ip_forward = 1
-${mptcp_settings}
-${NET_MARKER_END}
-EOF
-    
-    info "正在应用 sysctl 配置..."
-    sysctl -p >/dev/null 2>&1
-    
-    local interface;
-    if interface=$(detect_main_interface); then
-        info "正在为主网卡 '$interface' 配置 fq_codel 队列..."
-        tc qdisc replace dev "$interface" root fq_codel &>/dev/null
-    fi
-    success "网络优化配置完成。"
-}
-
-revert_network_changes() {
-    info "--- 正在恢复网络配置 ---"
-    local sysctl_orig="${SYSCTL_CONFIG}.original"
-    if [[ -f "$sysctl_orig" ]]; then
-        cp "$sysctl_orig" "$SYSCTL_CONFIG"
-        sysctl -p &>/dev/null
-        success "sysctl.conf 已恢复。"
-    fi
-    local limits_orig="${LIMITS_CONFIG}.original"
-    if [[ -f "$limits_orig" ]]; then
-        cp "$limits_orig" "$LIMITS_CONFIG"
-        success "limits.conf 已恢复。"
-    fi
-}
-
-show_network_status() {
-    info "--- 网络优化状态检查 ---"
-    local cc qdisc tfo
-    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "N/A")
-    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "N/A")
-    tfo=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo "N/A")
-    
-    [[ "$cc" == "bbr" ]] && success "拥塞控制: $cc" || warn "拥塞控制: $cc (BBR 未启用)"
-    [[ "$qdisc" == "fq_codel" ]] && success "默认队列调度: $qdisc" || warn "默认队列调度: $qdisc (fq_codel 未启用)"
-    [[ "$tfo" == "3" ]] && success "TCP Fast Open: $tfo" || warn "TCP Fast Open: $tfo (未完全启用)"
-}
-
-# =================================================
-# SSH 安全加固模块
-# =================================================
-
+# 检查SSH密钥
 check_ssh_keys() {
-    [[ -f "$HOME/.ssh/authorized_keys" && -s "$HOME/.ssh/authorized_keys" ]]
-}
-
-update_ssh_config() {
-    local key="$1" value="$2"
-    info "设置 SSH: $key -> $value"
-    # 如果键已存在（无论是否被注释），则替换它
-    if grep -qE "^\s*#?\s*${key}\s+" "$SSH_CONFIG"; then
-        sed -i -E "s/^\s*#?\s*${key}\s+.*/${key} ${value}/" "$SSH_CONFIG"
-    else
-        # 否则，在文件末尾添加它
-        echo "${key} ${value}" >> "$SSH_CONFIG"
-    fi
-}
-
-apply_ssh_hardening() {
-    info "--- 开始应用 SSH 安全加固 ---"
-    backup_file "$SSH_CONFIG"
+    debug_log "检查SSH密钥"
+    local key_count=0
     
-    # --- 交互式配置 ---
-    read -p "请输入新的 SSH 端口 [1024-65535] (留空则保持不变): " new_port
-    if [[ -n "$new_port" ]]; then
-        update_ssh_config "Port" "$new_port"
-    fi
-
-    if check_ssh_keys; then
-        read -p "检测到 SSH 密钥。是否禁用密码登录? [Y/n]: " -r choice
-        if [[ ! "$choice" =~ ^[Nn]$ ]]; then
-            update_ssh_config "PasswordAuthentication" "no"
+    # 检查authorized_keys
+    if [[ -f "$AUTHORIZED_KEYS" && -s "$AUTHORIZED_KEYS" ]]; then
+        key_count=$(grep -c "^ssh-" "$AUTHORIZED_KEYS" 2>/dev/null || echo "0")
+        if (( key_count > 0 )); then
+            debug_log "找到 $key_count 个SSH密钥在 authorized_keys"
+            return 0
         fi
-    else
-        warn "未检测到 SSH 密钥，建议在禁用密码登录前进行配置。"
     fi
+    
+    # 检查公钥文件
+    local key_files=("$HOME/.ssh/id_rsa.pub" "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_ecdsa.pub")
+    for key_file in "${key_files[@]}"; do
+        if [[ -f "$key_file" ]]; then
+            debug_log "找到SSH公钥文件: $key_file"
+            return 0
+        fi
+    done
+    
+    debug_log "未找到SSH密钥"
+    return 1
+}
 
-    echo "请选择 Root 登录策略:"
-    echo "  1) 禁止 Root 登录 (最安全)"
-    echo "  2) 仅允许密钥登录"
-    echo "  3) 保持不变"
-    read -p "选择 [1-3]: " -r choice
-    case "$choice" in
-        1) update_ssh_config "PermitRootLogin" "no" ;;
-        2) update_ssh_config "PermitRootLogin" "prohibit-password" ;;
-        *) info "保持当前 Root 登录策略。" ;;
+# 获取当前Root登录设置
+get_current_root_login() {
+    debug_log "获取当前Root登录设置"
+    local current_setting
+    if current_setting=$(grep "^PermitRootLogin" "$SSH_CONFIG" 2>/dev/null | awk '{print $2}'); then
+        echo "$current_setting"
+    else
+        # 如果没有显式配置，SSH默认是prohibit-password
+        echo "prohibit-password"
+    fi
+    return 0
+}
+
+# 格式化Root登录设置显示
+format_root_login_display() {
+    local setting="$1"
+    debug_log "格式化Root登录显示: $setting"
+    case "$setting" in
+        "no") echo "禁止Root登录" ;;
+        "prohibit-password") echo "仅允许密钥登录" ;;
+        "yes") echo "允许密码登录" ;;
+        *) echo "未知设置: $setting" ;;
     esac
-
-    # --- 应用其他安全设置 ---
-    update_ssh_config "PubkeyAuthentication" "yes"
-    update_ssh_config "PermitEmptyPasswords" "no"
-    update_ssh_config "MaxAuthTries" "3"
-    update_ssh_config "X11Forwarding" "no"
-    update_ssh_config "UseDNS" "no"
-
-    info "正在验证并重新加载 SSH 服务..."
-    if sshd -t; then
-        systemctl reload sshd
-        success "SSH 安全配置已应用。"
-    else
-        error "SSH 配置文件语法错误！请手动检查 $SSH_CONFIG"
-    fi
+    return 0
 }
 
-revert_ssh_changes() {
-    info "--- 正在恢复 SSH 配置 ---"
-    local ssh_orig="${SSH_CONFIG}.original"
-    if [[ -f "$ssh_orig" ]]; then
-        cp "$ssh_orig" "$SSH_CONFIG"
-        systemctl reload sshd
-        success "sshd_config 已恢复。"
-    fi
-}
-
-show_ssh_status() {
-    info "--- SSH 安全状态检查 ---"
-    local port pass root
-    port=$(grep -E "^\s*Port\s+" "$SSH_CONFIG" | awk '{print $2}' || echo "22")
-    pass=$(grep -E "^\s*PasswordAuthentication\s+" "$SSH_CONFIG" | awk '{print $2}' || echo "yes")
-    root=$(grep -E "^\s*PermitRootLogin\s+" "$SSH_CONFIG" | awk '{print $2}' || echo "prohibit-password")
-
-    success "SSH 端口: $port"
-    [[ "$pass" == "no" ]] && success "密码登录: 已禁用" || warn "密码登录: 已启用"
-    [[ "$root" == "no" ]] && success "Root 登录: 已禁用" || warn "Root 登录: $root"
-}
-
-# =================================================
-# 主函数 (Main)
-# =================================================
-
-usage() {
-    echo "用法: $0 [command]"
-    echo "Commands:"
-    echo "  (无参数)      - 进入交互模式"
-    echo "  apply        - 应用所有优化和加固"
-    echo "  status       - 检查所有模块的状态"
-    echo "  revert       - 恢复所有模块的配置"
-    echo "  apply-net    - 仅应用网络优化"
-    echo "  apply-ssh    - 仅应用 SSH 加固"
-}
-
-main() {
-    check_root
-    local action="${1:-interactive}"
-
-    case "$action" in
-        apply) check_dependencies; apply_network_optimizations; apply_ssh_hardening; show_status ;;
-        status) show_network_status; show_ssh_status ;;
-        revert) revert_network_changes; revert_ssh_changes ;;
-        apply-net) check_dependencies; apply_network_optimizations; show_network_status ;;
-        apply-ssh) check_dependencies; apply_ssh_hardening; show_ssh_status ;;
-        interactive)
-            echo "请选择要执行的操作:"
-            echo "  1) 应用所有优化 (网络 + SSH)"
-            echo "  2) 仅应用网络优化"
-            echo "  3) 仅应用 SSH 安全加固"
-            echo "  4) 查看当前状态"
-            echo "  5) 恢复所有配置"
-            read -p "选择 [1-5]: " -r choice
-            case "$choice" in
-                1) main "apply" ;;
-                2) main "apply-net" ;;
-                3) main "apply-ssh" ;;
-                4) main "status" ;;
-                5) main "revert" ;;
-                *) echo "无效选择。" ;;
-            esac
+# === 核心功能函数 ===
+# 选择SSH端口
+choose_ssh_ports() {
+    debug_log "开始选择SSH端口"
+    local current_ports=$(get_current_ssh_ports)
+    
+    echo "当前SSH端口: $current_ports" >&2
+    echo "端口配置:" >&2
+    echo "  1) 保持当前 ($current_ports)" >&2
+    echo "  2) 使用2222端口" >&2
+    echo "  3) 使用2022端口" >&2
+    echo "  4) 自定义端口" >&2
+    echo >&2
+    
+    local choice new_ports
+    read -p "请选择 [1-4] (默认: 1): " choice >&2 || choice="1"
+    choice=${choice:-1}
+    
+    case "$choice" in
+        1)
+            debug_log "用户选择保持当前端口: $current_ports"
+            echo "$current_ports"
+            ;;
+        2)
+            if validate_port "2222" "$current_ports"; then
+                debug_log "用户选择端口2222"
+                echo "2222"
+            else
+                echo "端口2222不可用，保持当前端口" >&2
+                echo "$current_ports"
+            fi
+            ;;
+        3)
+            if validate_port "2022" "$current_ports"; then
+                debug_log "用户选择端口2022"
+                echo "2022"
+            else
+                echo "端口2022不可用，保持当前端口" >&2
+                echo "$current_ports"
+            fi
+            ;;
+        4)
+            while true; do
+                read -p "输入端口号 (1024-65535): " new_ports >&2 || new_ports=""
+                if [[ -z "$new_ports" ]]; then
+                    echo "端口为空，保持当前端口" >&2
+                    echo "$current_ports"
+                    break
+                elif validate_port "$new_ports" "$current_ports"; then
+                    debug_log "用户自定义端口: $new_ports"
+                    echo "$new_ports"
+                    break
+                else
+                    echo "端口无效或被占用，请重新输入" >&2
+                fi
+            done
             ;;
         *)
-            usage
-            error "无效的参数: $action"
+            echo "无效选择，保持当前端口" >&2
+            echo "$current_ports"
             ;;
     esac
+    return 0
 }
+
+# 配置密码认证
+configure_password_auth() {
+    debug_log "开始配置密码认证"
+    if check_ssh_keys; then
+        local key_count=$(grep -c "^ssh-" "$AUTHORIZED_KEYS" 2>/dev/null || echo "0")
+        echo "SSH密钥状态: 已配置 ($key_count 个)" >&2
+        
+        local disable_password
+        read -p "是否禁用密码登录? [Y/n] (默认: Y): " -r disable_password >&2 || disable_password="Y"
+        disable_password=${disable_password:-Y}
+        
+        if [[ "$disable_password" =~ ^[Yy]$ ]]; then
+            echo "密码登录: 将禁用" >&2
+            debug_log "用户选择禁用密码登录"
+            echo "no"
+        else
+            echo "密码登录: 保持启用" >&2
+            debug_log "用户选择启用密码登录"
+            echo "yes"
+        fi
+    else
+        echo "SSH密钥状态: 未配置" >&2
+        echo "为了安全考虑，建议先配置SSH密钥后再禁用密码登录" >&2
+        echo "密码登录: 保持启用" >&2
+        debug_log "未找到SSH密钥，保持密码登录"
+        echo "yes"
+    fi
+    return 0
+}
+
+# 配置Root登录策略
+configure_root_login() {
+    debug_log "开始配置Root登录策略"
+    local current_setting=$(get_current_root_login)
+    local current_display=$(format_root_login_display "$current_setting")
+    
+    echo "当前Root登录设置: $current_display" >&2
+    echo "Root登录策略:" >&2
+    echo "  1) 维持原样 ($current_display)" >&2
+    echo "  2) 禁止Root登录 (推荐)" >&2
+    echo "  3) 仅允许密钥登录" >&2
+    echo "  4) 允许密码登录 (不推荐)" >&2
+    echo >&2
+    
+    local choice
+    read -p "请选择 [1-4] (默认: 1): " choice >&2 || choice="1"
+    choice=${choice:-1}
+    
+    case "$choice" in
+        1)
+            debug_log "用户选择维持当前Root登录设置: $current_setting"
+            echo "Root登录: 维持原样 ($current_display)" >&2
+            echo "$current_setting"
+            ;;
+        2)
+            debug_log "用户选择禁止Root登录"
+            echo "Root登录: 禁止" >&2
+            echo "no"
+            ;;
+        3)
+            debug_log "用户选择Root仅密钥登录"
+            echo "Root登录: 仅允许密钥" >&2
+            echo "prohibit-password"
+            ;;
+        4)
+            debug_log "用户选择Root允许密码登录"
+            echo "Root登录: 允许密码 (不推荐)" >&2
+            echo "yes"
+            ;;
+        *)
+            debug_log "无效选择，维持当前Root登录设置: $current_setting"
+            echo "无效选择，维持原样: $current_display" >&2
+            echo "$current_setting"
+            ;;
+    esac
+    return 0
+}
+
+# 生成SSH安全配置
+generate_ssh_config() {
+    local new_ports="$1"
+    local password_auth="$2"
+    local root_login="$3"
+    
+    debug_log "生成SSH配置: 端口=$new_ports, 密码认证=$password_auth, Root登录=$root_login"
+    
+    local temp_config
+    if ! temp_config=$(mktemp); then
+        log "无法创建临时配置文件" "error"
+        return 1
+    fi
+    
+    # 生成精简但安全的SSH配置
+    if ! cat > "$temp_config" << EOF; then
+# SSH daemon configuration
+# Generated by ssh-security module $(date)
+
+# Network
+$(for port in $new_ports; do echo "Port $port"; done)
+
+# Authentication
+PermitRootLogin $root_login
+PasswordAuthentication $password_auth
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+
+# Security
+MaxAuthTries 3
+LoginGraceTime 60
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+# Disable less secure features
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+UseDNS no
+
+# System integration
+UsePAM yes
+PrintMotd no
+
+# Subsystem
+Subsystem sftp /usr/lib/openssh/sftp-server
+EOF
+        log "无法写入SSH配置文件" "error"
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    echo "$temp_config"
+    return 0
+}
+
+# 应用SSH配置
+apply_ssh_config() {
+    local temp_config="$1"
+    
+    debug_log "开始应用SSH配置"
+    
+    # 验证配置文件语法
+    if ! sshd -t -f "$temp_config" 2>/dev/null; then
+        local sshd_error
+        sshd_error=$(sshd -t -f "$temp_config" 2>&1)
+        log "SSH配置验证失败: $sshd_error" "error"
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    debug_log "SSH配置验证通过"
+    
+    # 备份当前配置
+    if ! backup_ssh_config; then
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    # 应用新配置
+    if ! mv "$temp_config" "$SSH_CONFIG"; then
+        log "无法替换SSH配置文件" "error"
+        return 1
+    fi
+    
+    # 设置正确的权限
+    chmod 644 "$SSH_CONFIG" || {
+        log "设置SSH配置文件权限失败" "warn"
+    }
+    
+    debug_log "SSH配置文件已更新"
+    
+    # 重新加载SSH服务
+    if systemctl reload sshd 2>/dev/null; then
+        echo "SSH服务: 已重新加载"
+        debug_log "SSH服务重新加载成功"
+        return 0
+    else
+        log "SSH服务重新加载失败，尝试重启" "warn"
+        if systemctl restart sshd 2>/dev/null; then
+            echo "SSH服务: 已重启"
+            debug_log "SSH服务重启成功"
+            return 0
+        else
+            log "SSH服务重启失败，恢复配置" "error"
+            # 恢复备份配置
+            local backup_file
+            backup_file=$(ls -t "$SSH_CONFIG.backup."* 2>/dev/null | head -1)
+            if [[ -n "$backup_file" ]]; then
+                cp "$backup_file" "$SSH_CONFIG"
+                systemctl restart sshd
+                log "已恢复备份配置" "warn"
+            fi
+            return 1
+        fi
+    fi
+}
+
+# 显示配置摘要
+show_ssh_summary() {
+    debug_log "显示SSH配置摘要"
+    echo
+    log "🎯 SSH安全摘要:" "info"
+    
+    local current_ports=$(get_current_ssh_ports)
+    echo "  SSH端口: $current_ports"
+    
+    if grep -q "PasswordAuthentication no" "$SSH_CONFIG" 2>/dev/null; then
+        echo "  密码登录: 已禁用"
+    else
+        echo "  密码登录: 已启用"
+    fi
+    
+    local root_setting
+    root_setting=$(grep "PermitRootLogin" "$SSH_CONFIG" | awk '{print $2}' 2>/dev/null || echo "unknown")
+    case "$root_setting" in
+        "no") echo "  Root登录: 已禁止" ;;
+        "prohibit-password") echo "  Root登录: 仅允许密钥" ;;
+        "yes") echo "  Root登录: 允许密码" ;;
+        *) echo "  Root登录: 未知状态" ;;
+    esac
+    
+    if check_ssh_keys; then
+        local key_count
+        key_count=$(grep -c "^ssh-" "$AUTHORIZED_KEYS" 2>/dev/null || echo "0")
+        echo "  SSH密钥: 已配置 ($key_count 个)"
+    else
+        echo "  SSH密钥: 未配置"
+    fi
+    return 0
+}
+
+# 显示安全提醒
+show_security_warnings() {
+    local new_ports="$1"
+    local password_auth="$2"
+    
+    debug_log "显示安全提醒"
+    echo
+    log "⚠️ 重要提醒:" "warn"
+    
+    if [[ "$new_ports" != "22" ]]; then
+        echo "  新SSH连接命令: ssh -p $new_ports user@server"
+        echo "  请确保防火墙允许新端口 $new_ports"
+    fi
+    
+    if [[ "$password_auth" == "no" ]] && ! check_ssh_keys; then
+        echo "  ⚠️ 警告: 密码登录已禁用但未检测到SSH密钥!"
+        echo "  请立即配置SSH密钥，否则可能无法登录!"
+    fi
+    
+    echo "  建议测试新连接后再关闭当前会话"
+    return 0
+}
+
+# === 主流程 ===
+main() {
+    debug_log "开始SSH安全配置"
+    
+    # 检查root权限
+    if [[ $EUID -ne 0 ]]; then
+        log "需要root权限运行" "error"
+        exit 1
+    fi
+    
+    # 检查SSH服务
+    if ! systemctl is-active sshd &>/dev/null; then
+        log "SSH服务未运行" "error"
+        exit 1
+    fi
+    
+    log "🔐 配置SSH安全..." "info"
+    
+    echo
+    local new_ports
+    if ! new_ports=$(choose_ssh_ports); then
+        log "端口选择失败" "error"
+        exit 1
+    fi
+    
+    echo
+    local password_auth
+    if ! password_auth=$(configure_password_auth); then
+        log "密码认证配置失败" "error"
+        exit 1
+    fi
+    
+    echo
+    local root_login
+    if ! root_login=$(configure_root_login); then
+        log "Root登录配置失败" "error"
+        exit 1
+    fi
+    
+    echo
+    echo "正在生成SSH配置..."
+    local temp_config
+    if ! temp_config=$(generate_ssh_config "$new_ports" "$password_auth" "$root_login"); then
+        log "SSH配置生成失败" "error"
+        exit 1
+    fi
+    
+    if ! apply_ssh_config "$temp_config"; then
+        log "✗ SSH配置应用失败" "error"
+        exit 1
+    fi
+    
+    show_security_warnings "$new_ports" "$password_auth"
+    show_ssh_summary
+    
+    echo
+    log "✅ SSH安全配置完成!" "info"
+    return 0
+}
+
+# 错误处理
+trap 'log "脚本执行出错，行号: $LINENO" "error"; exit 1' ERR
 
 main "$@"
