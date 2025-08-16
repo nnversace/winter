@@ -12,6 +12,7 @@
 #   (/etc/default/zramswap) instead of manual udev rules for better stability.
 # - [ROBUST] SSH config updates are now more robust against existing commented lines.
 # - [ENHANCE] Improved logging and status reporting clarity.
+# - [FIX] ZRAM service name is now dynamically detected to support multiple environments.
 #
 # Features:
 # - Network: Enables BBR + FQ, TFO, and system limits.
@@ -206,8 +207,12 @@ setup_zram() {
     info "--- 开始配置智能 ZRAM ---"
     if ! command -v zramctl &>/dev/null; then
         info "正在安装 zram-tools..."
-        DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null
-        DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null || error "zram-tools 安装失败。"
+        # 移除 >/dev/null 以便在安装失败时查看错误
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools || error "zram-tools 安装失败。"
+        # 安装后重新加载 systemd 服务列表
+        info "重新加载 systemd daemon..."
+        systemctl daemon-reload
     fi
     
     local mem_total_kb; mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
@@ -223,8 +228,18 @@ setup_zram() {
         echo "PRIORITY=100"
     } > /etc/default/zramswap
     
-    info "正在重启 zram-config 服务以应用配置..."
-    systemctl restart zram-config
+    # 动态查找 ZRAM 服务名
+    local service_name=""
+    if systemctl list-unit-files | grep -q 'zram-config.service'; then
+        service_name="zram-config"
+    elif systemctl list-unit-files | grep -q 'zramswap.service'; then
+        service_name="zramswap"
+    else
+        error "安装 zram-tools 后，未能找到对应的 systemd 服务 (zram-config.service 或 zramswap.service)。"
+    fi
+    
+    info "正在使用 '${service_name}.service' 重启 ZRAM 服务以应用配置..."
+    systemctl restart "${service_name}"
     
     echo "vm.swappiness = 80" > /etc/sysctl.d/99-zram.conf
     sysctl -p /etc/sysctl.d/99-zram.conf >/dev/null
@@ -240,7 +255,8 @@ setup_timezone_and_time() {
     info "正在安装并配置 chrony 时间同步服务..."
     systemctl stop systemd-timesyncd 2>/dev/null || true
     systemctl disable systemd-timesyncd 2>/dev/null || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y chrony >/dev/null || error "chrony 安装失败。"
+    # 移除 >/dev/null 以便在安装失败时查看错误
+    DEBIAN_FRONTEND=noninteractive apt-get install -y chrony || error "chrony 安装失败。"
     systemctl enable --now chrony
     success "Chrony 已启动并设为开机自启。"
 }
@@ -251,8 +267,20 @@ revert_system_changes() {
     info "--- 正在恢复系统优化配置 ---"
     if command -v zramctl &>/dev/null; then
         info "正在卸载 zram-tools 并清理配置..."
-        systemctl stop zram-config 2>/dev/null || true
-        DEBIAN_FRONTEND=noninteractive apt-get purge -y zram-tools >/dev/null
+        # 动态查找 ZRAM 服务名以停止
+        local service_name=""
+        if systemctl list-unit-files | grep -q 'zram-config.service'; then
+            service_name="zram-config"
+        elif systemctl list-unit-files | grep -q 'zramswap.service'; then
+            service_name="zramswap"
+        fi
+        
+        if [[ -n "$service_name" ]]; then
+            systemctl stop "${service_name}" 2>/dev/null || true
+        fi
+        
+        # 移除 >/dev/null 以便在卸载失败时查看错误
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y zram-tools
     fi
     rm -f /etc/sysctl.d/99-zram.conf
     success "ZRAM 配置已移除。"
