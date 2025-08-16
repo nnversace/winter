@@ -11,7 +11,7 @@
 #   - 适配 Debian 13 Trixie
 #   - 新增内核优化、网络优化及 MosDNS 模块
 #   - 优化模块执行顺序，确保系统稳定性
-#   - 支持自定义 SSH 端口
+#   - [优化] 单个模块失败后不中断整体流程
 #
 #=============================================================================
 
@@ -56,7 +56,6 @@ SKIPPED_MODULES=()
 SELECTED_MODULES=()
 declare -A MODULE_EXEC_TIME=()
 TOTAL_START_TIME=0
-CUSTOM_SSH_PORT=""
 
 #--- 颜色定义 ---
 readonly RED='\033[0;31m'
@@ -94,10 +93,13 @@ cleanup() {
         rm -rf "$TEMP_DIR"
         log "临时目录 $TEMP_DIR 已清理" "info"
     fi
-    if (( exit_code != 0 )); then
+    # 仅在脚本非正常退出时显示错误
+    # The exit code is checked against the number of failed modules.
+    # If they are equal, it means the script finished but some modules failed.
+    # If they are not equal (and not 0), it means the script itself crashed.
+    if (( exit_code != 0 && exit_code != ${#FAILED_MODULES[@]} )); then
         log "脚本意外终止 (退出码: $exit_code)。详情请查看日志: $LOG_FILE" "error"
     fi
-    exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
 
@@ -194,27 +196,6 @@ select_modules() {
     fi
 }
 
-#--- 获取自定义 SSH 端口 ---
-get_custom_ssh_port() {
-    if [[ " ${SELECTED_MODULES[*]} " =~ " ssh-security " ]]; then
-        log "SSH 安全模块配置" "header"
-        while true; do
-            read -p "请输入新的 SSH 端口 (1024-65535, 推荐20000以上, 留空则不修改): " -r port_input
-            if [[ -z "$port_input" ]]; then
-                CUSTOM_SSH_PORT=""
-                log "用户跳过 SSH 端口自定义。" "warn"
-                break
-            elif [[ "$port_input" =~ ^[0-9]+$ ]] && (( port_input >= 1024 && port_input <= 65535 )); then
-                CUSTOM_SSH_PORT="$port_input"
-                log "SSH 端口将设置为: $CUSTOM_SSH_PORT" "info"
-                break
-            else
-                log "无效输入。请输入 1024 到 65535 之间的数字。" "error"
-            fi
-        done
-    fi
-}
-
 #--- 下载模块 ---
 download_module() {
     local module="$1"
@@ -235,7 +216,7 @@ download_module() {
     return 1
 }
 
-#--- 执行模块 ---
+#--- [优化] 执行模块 (增加错误容忍) ---
 execute_module() {
     local module="$1"
     local module_file="$TEMP_DIR/${module}.sh"
@@ -252,13 +233,13 @@ execute_module() {
     start_time=$(date +%s)
     
     local exec_result=0
-    # 为特定模块传递参数
-    if [[ "$module" == "ssh-security" ]] && [[ -n "$CUSTOM_SSH_PORT" ]]; then
-        log "传递自定义端口 $CUSTOM_SSH_PORT 到 ssh-security 模块" "info"
-        bash "$module_file" "$CUSTOM_SSH_PORT" || exec_result=$?
-    else
-        bash "$module_file" || exec_result=$?
-    fi
+    # 暂时禁用 exit-on-error (-e)，以便捕获模块的退出代码
+    # 而不会导致主脚本终止。
+    set +e
+    bash "$module_file"
+    exec_result=$?
+    # 重新启用 exit-on-error
+    set -e
     
     local end_time
     end_time=$(date +%s)
@@ -271,7 +252,7 @@ execute_module() {
         return 0
     else
         FAILED_MODULES+=("$module")
-        log "模块 $module 执行失败 (耗时 ${duration}s)" "error"
+        log "模块 $module 执行失败 (退出码: $exec_result, 耗时 ${duration}s)" "error"
         return 1
     fi
 }
@@ -363,7 +344,6 @@ main() {
     
     # 交互阶段
     select_modules
-    get_custom_ssh_port
     
     log "已选择 ${#SELECTED_MODULES[@]} 个模块: ${SELECTED_MODULES[*]}" "info"
     read -p "配置完成，按 Enter 键开始执行..."
@@ -372,6 +352,7 @@ main() {
     for module_key in "${ORDERED_MODULE_KEYS[@]}"; do
         if [[ " ${SELECTED_MODULES[*]} " =~ " ${module_key} " ]]; then
             if download_module "$module_key"; then
+                # execute_module会处理失败情况，并记录到FAILED_MODULES
                 execute_module "$module_key"
             else
                 FAILED_MODULES+=("$module_key")
@@ -383,14 +364,18 @@ main() {
     # 完成阶段
     generate_summary
 
-    # SSH 最终提醒
-    if [[ " ${EXECUTED_MODULES[*]} " =~ " ssh-security " ]] && [[ -n "$CUSTOM_SSH_PORT" ]]; then
-        local current_ip
-        current_ip=$(hostname -I | awk '{print $1}')
-        log "重要提醒: SSH 端口已更改为 $CUSTOM_SSH_PORT。请使用新端口重新连接: ssh user@${current_ip} -p ${CUSTOM_SSH_PORT}" "warn"
+    # 提醒用户检查SSH模块的输出
+    if [[ " ${EXECUTED_MODULES[*]} " =~ " ssh-security " ]]; then
+        log "SSH 安全模块已执行。请检查该模块的输出日志以确认端口是否已更改以及如何重新连接。" "warn"
     fi
     
-    log "所有任务已执行完毕！" "success"
+    if (( ${#FAILED_MODULES[@]} > 0 )); then
+        log "部分模块执行失败，请检查日志: $LOG_FILE" "warn"
+        # 脚本以失败模块的数量作为退出码
+        exit "${#FAILED_MODULES[@]}"
+    else
+        log "所有任务已执行完毕！" "success"
+    fi
 }
 
 # --- 脚本入口 ---
