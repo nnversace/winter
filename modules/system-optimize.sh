@@ -18,6 +18,7 @@
 #     focusing on a robust single-device configuration managed by `zram-tools`.
 #   - [Automation] Added a '-y' / '--yes' flag for non-interactive execution.
 #   - [Clarity] Enhanced comments and logging for better user understanding.
+#   - [Fix] Improved error handling and diagnostics for the chrony service.
 # ==============================================================================
 
 set -euo pipefail
@@ -284,20 +285,36 @@ setup_chrony() {
     if systemctl is-active --quiet systemd-timesyncd; then
         log "正在停用 systemd-timesyncd 以避免冲突..." "info"
         systemctl stop systemd-timesyncd
-        systemctl disable systemd-timesyncd >/dev/null 2>&1
+        systemctl disable systemd-timesyncd >/dev/null 2>&1 || log "禁用 systemd-timesyncd 时出现非致命错误。" "warn"
+    fi
+
+    # Unmask chrony service if it's masked
+    if [[ "$(systemctl is-enabled chrony 2>/dev/null)" == "masked" ]]; then
+        log "检测到 chrony 服务被屏蔽，正在取消屏蔽..." "warn"
+        systemctl unmask chrony >/dev/null 2>&1
     fi
 
     log "正在启用并启动 chrony 服务..." "info"
-    systemctl enable --now chrony >/dev/null 2>&1
+    # Capture potential errors from systemctl. No output redirection.
+    if ! systemctl enable --now chrony; then
+        log "✗ 'systemctl enable --now chrony' 命令执行失败。" "error"
+        log "请检查以下日志获取详细信息:" "info"
+        # Show the last 20 lines of the chrony journal
+        journalctl -u chrony --no-pager -n 20
+        return 1
+    fi
     
-    # Force a time sync
+    # Force a time sync in the background
     chronyc -a makestep >/dev/null 2>&1 &
     
-    sleep 2
+    sleep 2 # Give it a moment to stabilize
     if systemctl is-active --quiet chrony; then
         log "✓ Chrony 服务已激活。" "success"
     else
-        log "✗ Chrony 服务启动失败。" "error"
+        log "✗ Chrony 服务启动失败。请检查服务状态。" "error"
+        log "服务状态详情:" "info"
+        # Show the full status which usually contains the root cause
+        systemctl status chrony --no-pager
         return 1
     fi
 }
