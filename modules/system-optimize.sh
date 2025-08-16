@@ -347,7 +347,7 @@ main() {
     echo
     log "此脚本将优化 ZRAM Swap、时区和时间同步。" "info"
     log "所有配置都将以符合现代系统管理规范的方式进行。" "info"
-e   cho
+    echo
 
     if ! $UNATTENDED; then
         read -p "是否继续进行系统优化? [Y/n]: " -r choice
