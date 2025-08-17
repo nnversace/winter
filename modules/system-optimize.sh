@@ -1,763 +1,404 @@
 #!/bin/bash
-# 系统优化模块 v5.1 - 智能Zram版 - 完全修复版
-# 功能: 智能Zram配置、时区设置、时间同步
+# 系统优化脚本- 为Debian 13优化
+# 功能: 智能Zram配置, 时区与时间同步, 内核参数调优
 
+# --- 安全设置 ---
+# -e: 如果命令返回非零退出状态，则立即退出。
+# -u: 将未设置的变量和参数视为错误。
+# -o pipefail: 如果管道中的任何命令失败，则返回该命令的退出状态。
 set -euo pipefail
 
-# === 常量定义 ===
-readonly ZRAM_CONFIG="/etc/default/zramswap"
-readonly DEFAULT_TIMEZONE="Asia/Shanghai"
+# --- 全局常量 ---
+readonly ZRAM_CONFIG_FILE="/etc/default/zramswap"
+readonly SYSCTL_CONFIG_FILE="/etc/sysctl.d/99-zram-optimize.conf"
+readonly SCRIPT_VERSION="6.0"
+# 当DEBUG=1时启用详细日志
+readonly DEBUG="${DEBUG:-0}"
 
-# === 日志函数 ===
+# --- UI与日志函数 ---
+
+# 统一的日志输出函数
 log() {
-    local msg="$1" level="${2:-info}"
-    local -A colors=([info]="\033[0;36m" [warn]="\033[0;33m" [error]="\033[0;31m" [debug]="\033[0;35m")
-    echo -e "${colors[$level]:-\033[0;32m}$msg\033[0m"
+    local type="$1"
+    local msg="$2"
+    local color_ok="\033[0;32m"
+    local color_info="\033[0;36m"
+    local color_warn="\033[0;33m"
+    local color_error="\033[0;31m"
+    local color_debug="\033[0;35m"
+    local color_reset="\033[0m"
+    local prefix=""
+
+    case "$type" in
+        ok) prefix="[✓] " color="$color_ok" ;;
+        info) prefix="[i] " color="$color_info" ;;
+        warn) prefix="[!] " color="$color_warn" ;;
+        error) prefix="[✗] " color="$color_error" ;;
+        debug) [[ "$DEBUG" -eq 1 ]] || return 0; prefix="[DEBUG] " color="$color_debug" ;;
+        *) msg="$type"; prefix="    "; color="$color_reset" ;;
+    esac
+
+    # 使用printf以获得更好的格式控制
+    printf "%b%s%b%s\n" "$color" "$prefix" "$color_reset" "$msg"
 }
 
-debug_log() {
-    [[ "${DEBUG:-}" == "1" ]] && log "DEBUG: $1" "debug" >&2
+# 错误处理陷阱
+trap 'log "error" "脚本在第 $LINENO 行意外终止。"; exit 1' ERR
+
+# 脚本启动时的欢迎横幅
+print_banner() {
+    echo -e "\033[0;34m"
+    echo "======================================================"
+    echo "  智能系统优化脚本 v${SCRIPT_VERSION} - 为Debian 13优化"
+    echo "======================================================"
+    echo -e "\033[0m"
 }
 
-# === 辅助函数 ===
-# 转换大小单位到MB
+# --- 辅助函数 ---
+
+# 检查命令是否存在
+command_exists() {
+    command -v "$1" &>/dev/null
+}
+
+# 显示加载动画
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    while ps -p $pid > /dev/null; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\r"
+    done
+    printf "    \r"
+}
+
+# 以非交互方式安装软件包
+install_packages() {
+    local packages_to_install=()
+    for pkg in "$@"; do
+        if ! dpkg -l "$pkg" &>/dev/null; then
+            packages_to_install+=("$pkg")
+        fi
+    done
+
+    if [ ${#packages_to_install[@]} -gt 0 ]; then
+        log "info" "准备安装缺失的依赖: ${packages_to_install[*]}"
+        (
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y --no-install-recommends "${packages_to_install[@]}"
+        ) &> /dev/null &
+        spinner $!
+        log "ok" "依赖安装完成。"
+    fi
+}
+
+# 将不同单位的大小转换为MB
 convert_to_mb() {
-    local size="$1"
-    size=$(echo "$size" | tr -d ' ')
-    local value=$(echo "$size" | sed 's/[^0-9.]//g')
-    
-    case "${size^^}" in
-        *G|*GB) awk "BEGIN {printf \"%.0f\", $value * 1024}" ;;
-        *M|*MB) awk "BEGIN {printf \"%.0f\", $value}" ;;
-        *K|*KB) awk "BEGIN {printf \"%.0f\", $value / 1024}" ;;
-        *)      awk "BEGIN {printf \"%.0f\", $value / 1024 / 1024}" ;;
+    local size_str
+    size_str=$(echo "$1" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+    local val="${size_str//[^0-9.]/}"
+    case "$size_str" in
+        *G|*GB) awk "BEGIN {printf \"%.0f\", $val * 1024}" ;;
+        *M|*MB) awk "BEGIN {printf \"%.0f\", $val}" ;;
+        *K|*KB) awk "BEGIN {printf \"%.0f\", $val / 1024}" ;;
+        *) awk "BEGIN {printf \"%.0f\", $val / 1024 / 1024}" ;; # 默认为字节
     esac
 }
 
-# 转换为合适的显示单位
+# 将MB格式化为易于阅读的GB或MB
 format_size() {
     local mb="$1"
     if (( mb >= 1024 )); then
-        awk "BEGIN {gb=$mb/1024; printf (gb==int(gb)) ? \"%.0fGB\" : \"%.1fGB\", gb}"
+        awk -v mb="$mb" 'BEGIN {printf "%.1fG", mb / 1024}'
     else
-        echo "${mb}MB"
+        echo "${mb}M"
     fi
 }
 
-# 显示当前swap状态
-show_swap_status() {
-    local swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo "unknown")
-    echo "Swap配置: swappiness=$swappiness"
-    
-    local swap_output=$(swapon --show 2>/dev/null | tail -n +2)  # 跳过表头
-    if [[ -n "$swap_output" ]]; then
-        echo "Swap状态:"
-        while read -r device _ size used priority; do
-            [[ -z "$device" ]] && continue
-            if [[ "$device" == *"zram"* ]]; then
-                echo "  - Zram: $device ($size, 已用$used, 优先级$priority)"
-            else
-                echo "  - 磁盘: $device ($size, 已用$used, 优先级$priority)"
-            fi
-        done <<< "$swap_output"
-    else
-        echo "Swap状态: 无活动设备"
-    fi
-}
+# --- ZRAM核心功能 ---
 
-# 彻底清理zram配置 - 增强版
-cleanup_zram_completely() {
-    debug_log "开始彻底清理zram"
+# 彻底清理ZRAM配置
+cleanup_zram() {
+    log "debug" "开始彻底清理ZRAM..."
+    systemctl stop zramswap.service &>/dev/null || true
+    systemctl disable zramswap.service &>/dev/null || true
     
-    # 停止服务
-    systemctl stop zramswap.service 2>/dev/null || true
-    systemctl disable zramswap.service 2>/dev/null || true
+    # 查找并卸载所有活动的zram swap设备
+    local active_zram_swaps
+    active_zram_swaps=$(swapon --show --noheadings | awk '/^\/dev\/zram/ {print $1}')
+    if [[ -n "$active_zram_swaps" ]]; then
+        swapoff $active_zram_swaps &>/dev/null || true
+    fi
     
-    # 关闭所有zram设备
-    for dev in /dev/zram*; do
-        if [[ -b "$dev" ]]; then
-            swapoff "$dev" 2>/dev/null || true
-            echo 1 > "/sys/block/$(basename $dev)/reset" 2>/dev/null || true
-            debug_log "重置设备: $dev"
+    # 重置所有zram设备
+    for dev in /sys/block/zram*; do
+        if [[ -d "$dev" ]]; then
+            echo 1 > "$dev/reset" 2>/dev/null || true
+            log "debug" "已重置设备: $(basename "$dev")"
         fi
     done
     
-    # 卸载zram模块
-    modprobe -r zram 2>/dev/null || true
+    # 卸载zram内核模块
+    modprobe -r zram &>/dev/null || true
     
-    # 清理配置文件备份
-    [[ -f "$ZRAM_CONFIG" ]] && rm -f "${ZRAM_CONFIG}.bak" 2>/dev/null || true
-    
-    # 等待设备完全清理
-    sleep 2
-    debug_log "zram清理完成"
+    # 清理旧的配置文件
+    rm -f "$ZRAM_CONFIG_FILE" "${ZRAM_CONFIG_FILE}.bak" &>/dev/null
+    log "debug" "ZRAM清理完成。"
 }
 
-# === 核心功能函数 ===
-# CPU性能快速检测 - 修复bc依赖
-benchmark_cpu_quick() {
-    debug_log "开始CPU性能检测"
-    local cores=$(nproc)
-    
-    # 快速压缩测试
-    local start_time=$(date +%s.%N)
-    if ! timeout 10s bash -c 'dd if=/dev/zero bs=1M count=32 2>/dev/null | gzip -1 > /dev/null' 2>/dev/null; then
-        log "CPU检测超时，使用保守配置" "warn"
-        echo "weak"
-        return
-    fi
-    local end_time=$(date +%s.%N)
-    
-    local duration cpu_score
-    if command -v bc >/dev/null 2>&1; then
-        duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "5")
-        cpu_score=$(echo "scale=2; ($cores * 2) / $duration" | bc 2>/dev/null || echo "2")
-    else
-        # 备用计算：使用整数运算
-        local start_int=${start_time%.*}
-        local end_int=${end_time%.*}
-        duration=$((end_int - start_int + 1))  # 保守估计
-        cpu_score=$(( (cores * 200) / duration / 100 ))  # 简化计算
-    fi
-    
-    debug_log "CPU核心数: $cores, 测试时间: ${duration}s, 得分: $cpu_score"
-    
-    if command -v bc >/dev/null 2>&1; then
-        if (( $(echo "$cpu_score < 3" | bc -l 2>/dev/null || echo "1") )); then
-            echo "weak"
-        elif (( $(echo "$cpu_score < 8" | bc -l 2>/dev/null || echo "0") )); then
-            echo "moderate"  
-        else
-            echo "strong"
-        fi
-    else
-        # 备用比较
-        if (( cpu_score < 3 )); then
-            echo "weak"
-        elif (( cpu_score < 8 )); then
-            echo "moderate"
-        else
-            echo "strong"
-        fi
-    fi
-}
-
-# 获取内存分类
-get_memory_category() {
-    local mem_mb="$1"
-    
-    if (( mem_mb < 1024 )); then
-        echo "low"          # 低配 (<1GB)
-    elif (( mem_mb < 2048 )); then  
-        echo "medium"       # 中配 (1-2GB)
-    elif (( mem_mb < 4096 )); then
-        echo "high"         # 高配 (2-4GB)  
-    else
-        echo "flagship"     # 旗舰 (4GB+)
-    fi
-}
-
-# 智能决策矩阵 - 统一zstd版本
+# 智能决策矩阵，决定ZRAM配置
 get_optimal_zram_config() {
     local mem_mb="$1"
-    local cpu_level="$2"
-    local cores="$3"
-    
-    local mem_category=$(get_memory_category "$mem_mb")
-    debug_log "内存分类: $mem_category, CPU等级: $cpu_level, 核心数: $cores"
-    
-    # 统一使用zstd，根据内存调整策略
+    local cores="$2"
+    local mem_category
+
+    if (( mem_mb < 1024 )); then mem_category="low"; fi       # <1GB
+    if (( mem_mb >= 1024 && mem_mb < 2048 )); then mem_category="medium"; fi # 1-2GB
+    if (( mem_mb >= 2048 && mem_mb < 4096 )); then mem_category="high"; fi   # 2-4GB
+    if (( mem_mb >= 4096 )); then mem_category="flagship"; fi # 4GB+
+
+    log "debug" "内存分类: $mem_category, 核心数: $cores"
+
+    # 策略:
+    # 算法: zstd是现代内核的默认选择，性能和压缩率俱佳。
+    # 设备: 多核CPU可以从多zram设备中受益，减少锁争用。
+    # 乘数: 内存越小，zram/swap的需求越大，因此乘数更高。
     case "$mem_category" in
-        "low") 
-            echo "zstd,single,2.0" ;;    # 1GB以下更激进
-        "medium") 
-            echo "zstd,single,1.5" ;;    # 1-2GB
-        "high") 
-            if (( cores >= 4 )); then
-                echo "zstd,multi,1.0"    # 2-4GB，多核用多设备
-            else
-                echo "zstd,single,1.0"
-            fi
-            ;;
-        "flagship") 
-            if (( cores >= 4 )); then
-                echo "zstd,multi,0.6"    # 4GB+，适度配置
-            else
-                echo "zstd,single,0.8"
-            fi
-            ;;
-        *)
-            log "未知配置组合: $mem_category，使用默认" "warn"
-            echo "zstd,single,1.0"
-            ;;
+        "low")      echo "zstd,single,2.0" ;;
+        "medium")   echo "zstd,single,1.5" ;;
+        "high")     [[ "$cores" -ge 4 ]] && echo "zstd,multi,1.0" || echo "zstd,single,1.0" ;;
+        "flagship") [[ "$cores" -ge 4 ]] && echo "zstd,multi,0.75" || echo "zstd,single,0.8" ;;
+        *)          echo "zstd,single,1.0" ;; # 默认安全配置
     esac
 }
 
-# 设置系统参数（增强版，包含zswap禁用和页面集群优化）
-set_system_parameters() {
+# 配置内核参数以优化ZRAM
+set_kernel_parameters() {
     local mem_mb="$1"
-    local device_count="${2:-1}"
+    local swappiness
     
-    # 更积极的swappiness设置
-    local zram_priority disk_priority swappiness
-    
-    if (( mem_mb <= 1024 )); then
-        zram_priority=100; disk_priority=40; swappiness=60   # 低内存更积极使用swap
-    elif (( mem_mb <= 2048 )); then
-        zram_priority=100; disk_priority=30; swappiness=70   # 中等内存积极使用
-    elif (( mem_mb <= 4096 )); then
-        zram_priority=100; disk_priority=20; swappiness=80   # 高内存很积极
-    else
-        zram_priority=100; disk_priority=10; swappiness=90   # 旗舰配置最积极
-    fi
-    
-    debug_log "目标配置: zram优先级=$zram_priority, swappiness=$swappiness"
-    
-    # 创建完整的sysctl配置文件
-    local sysctl_file="/etc/sysctl.d/99-zram-optimize.conf"
-    local needs_update=false
-    
-    # 检查是否需要更新配置
-    if [[ ! -f "$sysctl_file" ]]; then
-        needs_update=true
-    else
-        # 检查关键参数是否匹配
-        local current_swappiness=$(grep "^vm.swappiness" "$sysctl_file" 2>/dev/null | awk '{print $3}')
-        local current_page_cluster=$(grep "^vm.page-cluster" "$sysctl_file" 2>/dev/null | awk '{print $3}')
-        
-        if [[ "$current_swappiness" != "$swappiness" ]] || [[ "$current_page_cluster" != "0" ]]; then
-            needs_update=true
-        fi
-    fi
-    
-    # 创建或更新sysctl配置文件
-    if [[ "$needs_update" == "true" ]]; then
-        cat > "$sysctl_file" << EOF
-# Zram优化配置 - 由系统优化脚本自动生成
-# 更积极地使用zram swap
+    # 根据内存大小调整交换倾向
+    if (( mem_mb <= 2048 )); then swappiness=80; else swappiness=60; fi
+
+    log "info" "配置内核参数: swappiness=$swappiness, page-cluster=0 (优化ZRAM)"
+
+    # 创建sysctl配置文件
+    # zswap.enabled=0: 避免与ZRAM双重压缩，确保ZRAM高效工作。
+    # page-cluster=0: 减少写入ZRAM的数据块大小，提高压缩效率。
+    cat > "$SYSCTL_CONFIG_FILE" << EOF
+# 由系统优化脚本 v${SCRIPT_VERSION} 自动生成
 vm.swappiness = $swappiness
-
-# 优化页面集群，提高zram效率（特别是使用zstd时）
 vm.page-cluster = 0
-
-# 禁用zswap避免与zram冲突
-# zswap会拦截要交换的页面，导致zram利用率低下
-kernel.zswap.enabled = 0
+zswap.enabled = 0
 EOF
-        
-        if [[ $? -eq 0 ]]; then
-            debug_log "sysctl配置已更新: swappiness=$swappiness, page-cluster=0, zswap disabled"
-            
-            # 应用配置
-            sysctl -p "$sysctl_file" >/dev/null 2>&1 || {
-                debug_log "sysctl应用失败，使用运行时设置"
-            }
-        else
-            log "sysctl配置文件写入失败" "error"
-        fi
-    fi
-    
-    # 运行时设置（确保立即生效）
-    # 1. 设置swappiness
-    local current_swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo "60")
-    if [[ "$current_swappiness" != "$swappiness" ]]; then
-        if [[ -w /proc/sys/vm/swappiness ]]; then
-            echo "$swappiness" > /proc/sys/vm/swappiness 2>/dev/null && \
-                debug_log "swappiness运行时已设置: $current_swappiness -> $swappiness"
-        fi
-    fi
-    
-    # 2. 设置page-cluster
-    local current_page_cluster=$(cat /proc/sys/vm/page-cluster 2>/dev/null || echo "3")
-    if [[ "$current_page_cluster" != "0" ]]; then
-        if [[ -w /proc/sys/vm/page-cluster ]]; then
-            echo "0" > /proc/sys/vm/page-cluster 2>/dev/null && \
-                debug_log "page-cluster已设置: $current_page_cluster -> 0"
-        fi
-    fi
-    
-    # 3. 禁用zswap（如果存在）
-    if [[ -f /sys/module/zswap/parameters/enabled ]]; then
-        local current_zswap=$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo "N")
-        if [[ "$current_zswap" == "Y" ]]; then
-            echo "0" > /sys/module/zswap/parameters/enabled 2>/dev/null && \
-                debug_log "zswap已禁用，避免与zram冲突"
-        fi
-    fi
-    
-    # 设置zram优先级（保持原有逻辑）
-    for i in $(seq 0 $((device_count - 1))); do
-        local device="/dev/zram$i"
-        if [[ -b "$device" ]]; then
-            if swapon --show 2>/dev/null | grep -q "^$device "; then
-                swapoff "$device" 2>/dev/null || continue
-            fi
-            if ! swapon "$device" -p "$zram_priority" 2>/dev/null; then
-                debug_log "设置zram$i优先级失败"
-                swapon "$device" 2>/dev/null || true
-            fi
-        fi
-    done
-    
-    # 设置磁盘swap优先级
-    local disk_swap_count=0
-    local disk_swap_output=$(swapon --show 2>/dev/null | grep -v zram | tail -n +2)
-    if [[ -n "$disk_swap_output" ]]; then
-        while read -r disk_swap _; do
-            [[ -n "$disk_swap" ]] || continue
-            if [[ -f "$disk_swap" || -b "$disk_swap" ]]; then
-                if swapoff "$disk_swap" 2>/dev/null && swapon "$disk_swap" -p "$disk_priority" 2>/dev/null; then
-                    ((disk_swap_count++))
-                    debug_log "磁盘swap $disk_swap 优先级设置为 $disk_priority"
-                fi
-            fi
-        done <<< "$disk_swap_output"
-    fi
-    
-    echo "$zram_priority,$swappiness,$disk_swap_count"
+
+    # 应用配置
+    sysctl -p "$SYSCTL_CONFIG_FILE" &>/dev/null || log "warn" "应用sysctl配置时出现非致命错误。"
 }
 
-# 配置单个zram设备 - 修复交互问题版本
-setup_single_zram() {
-    local size_mib="$1"
-    local algorithm="$2"
+# ZRAM配置主函数
+setup_zram() {
+    log "info" "正在配置智能ZRAM..."
+    local mem_total_kb
+    mem_total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    local mem_mb=$((mem_total_kb / 1024))
+    local cores
+    cores=$(nproc)
     
-    debug_log "配置单zram: ${size_mib}MB, 算法: $algorithm"
-    
-    # === 1. 预清理可能导致交互的配置文件 ===
-    if ! dpkg -l zram-tools &>/dev/null; then
-        debug_log "预清理可能的配置文件冲突"
-        # 如果包未安装但配置文件存在，先删除以避免交互
-        [[ -f "$ZRAM_CONFIG" ]] && rm -f "$ZRAM_CONFIG" 2>/dev/null || true
-        [[ -f "${ZRAM_CONFIG}.bak" ]] && rm -f "${ZRAM_CONFIG}.bak" 2>/dev/null || true
+    log "系统检测: $(format_size "$mem_mb") 内存, ${cores}核 CPU"
+
+    # 1. 获取最优配置
+    local config
+    config=$(get_optimal_zram_config "$mem_mb" "$cores")
+    local algorithm device_type multiplier
+    IFS=',' read -r algorithm device_type multiplier <<< "$config"
+
+    # 2. 计算目标ZRAM大小
+    local target_size_mb
+    target_size_mb=$(awk "BEGIN {printf \"%.0f\", $mem_mb * $multiplier}")
+    log "决策: 使用 $algorithm 算法, $device_type 设备模式, ZRAM大小为 $(format_size "$target_size_mb")"
+
+    # 3. 检查当前配置是否满足要求
+    local current_zram_size_mb=0
+    local current_zram_devices=0
+    if command_exists swapon && swapon --show --noheadings | grep -q zram; then
+        current_zram_size_mb=$(swapon --show --bytes --noheadings | awk '/zram/ {sum+=$3} END {print int(sum/1024/1024)}')
+        current_zram_devices=$(swapon --show --noheadings | grep -c zram)
     fi
     
-    # === 2. 包完整性检查和安装 ===
-    if ! dpkg -l zram-tools &>/dev/null; then
-        debug_log "安装zram-tools"
-        # 使用非交互模式安装
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null 2>&1 || {
-            log "zram-tools安装失败" "error"
-            return 1
-        }
-        systemctl daemon-reload
-    else
-        # 检查关键文件是否真的存在
-        if [[ ! -f /usr/sbin/zramswap ]] || [[ ! -f /usr/lib/systemd/system/zramswap.service ]]; then
-            log "检测到zram-tools包损坏，重新安装" "warn"
-            # 先清理配置文件避免交互
-            rm -f "$ZRAM_CONFIG" "${ZRAM_CONFIG}.bak" 2>/dev/null || true
-            apt-get purge -y zram-tools >/dev/null 2>&1 || true
-            apt-get autoremove -y >/dev/null 2>&1 || true
-            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null 2>&1; then
-                log "zram-tools重装失败" "error"
-                return 1
-            fi
-            systemctl daemon-reload
-        fi
+    local expected_devices=1
+    if [[ "$device_type" == "multi" ]]; then
+        expected_devices=$(( cores > 4 ? 4 : cores )) # 最多4个设备
     fi
+
+    local min_size=$((target_size_mb * 90 / 100))
+    local max_size=$((target_size_mb * 110 / 100))
+
+    if (( current_zram_size_mb >= min_size && current_zram_size_mb <= max_size && current_zram_devices == expected_devices )); then
+        log "ok" "当前ZRAM配置已是最佳，无需更改。"
+        set_kernel_parameters "$mem_mb" # 仍然确保内核参数是最优的
+        return 0
+    fi
+
+    log "info" "当前配置不匹配，正在重新配置..."
+
+    # 4. 清理并应用新配置
+    cleanup_zram
     
-    # 继续原来的配置逻辑...
-    debug_log "创建配置文件: SIZE=${size_mib}, ALGO=$algorithm"
-    
-    # 完全重写配置文件
-    cat > "$ZRAM_CONFIG" << EOF
-# Compression algorithm selection
+    # 安装zram-tools，这是在Debian上管理ZRAM最可靠的方式
+    install_packages zram-tools
+
+    # 写入zram-tools配置文件
+    cat > "$ZRAM_CONFIG_FILE" << EOF
 ALGO=$algorithm
-
-# Use fixed SIZE instead of PERCENT
-SIZE=$size_mib
-
-# Specifies the priority for the swap devices
+SIZE=$target_size_mb
 PRIORITY=100
 EOF
-    
-    debug_log "配置文件已创建"
-    [[ "${DEBUG:-}" == "1" ]] && cat "$ZRAM_CONFIG" >&2
-    
-    # 启动服务
-    if ! systemctl enable zramswap.service >/dev/null 2>&1; then
-        log "启用zramswap服务失败" "error"
+
+    # 5. 启动服务并验证
+    if ! systemctl restart zramswap.service; then
+        log "error" "启动zramswap服务失败。请检查系统日志。"
+        return 1
+    fi
+    systemctl enable zramswap.service &>/dev/null
+
+    # 等待几秒钟让swap设备激活
+    sleep 2
+
+    if ! swapon --show | grep -q zram; then
+        log "error" "ZRAM设备启动失败，配置未生效。"
         return 1
     fi
     
-    if ! systemctl start zramswap.service >/dev/null 2>&1; then
-        log "启动zramswap服务失败" "error"
-        return 1
-    fi
-    
-    sleep 3
-    
-    # 验证配置
-    if [[ -b /dev/zram0 ]]; then
-        local actual_bytes=$(cat /sys/block/zram0/disksize 2>/dev/null || echo "0")
-        local actual_mb=$((actual_bytes / 1024 / 1024))
-        local min_expected=$((size_mib * 95 / 100))
-        local max_expected=$((size_mib * 105 / 100))
-        
-        if (( actual_mb >= min_expected && actual_mb <= max_expected )); then
-            debug_log "zram配置成功: 期望${size_mib}MB, 实际${actual_mb}MB"
-            return 0
-        else
-            log "zram大小不匹配: 期望${size_mib}MB, 实际${actual_mb}MB" "error"
-            return 1
-        fi
-    else
-        log "zram设备未创建" "error"
-        return 1
-    fi
+    set_kernel_parameters "$mem_mb"
+    log "ok" "ZRAM配置成功。"
 }
 
-# 配置多个zram设备
-setup_multiple_zram() {
-    local total_size_mb="$1"
-    local algorithm="$2"
-    local cores="$3"
-    local device_count=$((cores > 4 ? 4 : cores))
-    local per_device_mb=$((total_size_mb / device_count))
-    
-    debug_log "配置多zram: ${device_count}个设备, 每个${per_device_mb}MB"
-    
-    # 彻底清理现有zram
-    cleanup_zram_completely
-    
-    # 加载zram模块
-    if ! modprobe zram num_devices="$device_count" 2>/dev/null; then
-        debug_log "加载zram模块失败"
-        return 1
-    fi
-    
-    sleep 1
-    
-    # 配置每个设备
-    for i in $(seq 0 $((device_count - 1))); do
-        local device="/dev/zram$i"
-        
-        # 等待设备就绪
-        local retry=0
-        while [[ ! -b "$device" ]] && (( retry < 10 )); do
-            sleep 0.1
-            ((retry++))
-        done
-        
-        [[ -b "$device" ]] || {
-            debug_log "设备zram$i未就绪"
-            return 1
-        }
-        
-        # 设置压缩算法
-        [[ -w "/sys/block/zram$i/comp_algorithm" ]] && 
-            echo "$algorithm" > "/sys/block/zram$i/comp_algorithm" 2>/dev/null ||
-            debug_log "设置zram$i压缩算法失败，使用默认"
-        
-        # 设置大小
-        echo "${per_device_mb}M" > "/sys/block/zram$i/disksize" 2>/dev/null || {
-            debug_log "设置zram$i大小失败"
-            return 1
-        }
-        
-        # 创建swap
-        mkswap "$device" >/dev/null 2>&1 || {
-            debug_log "创建zram$i swap失败"
-            return 1
-        }
-    done
-    
-    echo "$device_count"
-    return 0
-}
-
-# 主要的zram配置函数 - 完全修复版
-setup_zram() {
-    local mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
-    local cores=$(nproc)
-    local mem_display=$(format_size "$mem_mb")
-    
-    echo "检测到: ${mem_display}内存, ${cores}核CPU"
-    
-    # CPU性能检测
-    local cpu_level
-    if ! cpu_level=$(benchmark_cpu_quick); then
-        log "CPU检测失败，使用保守配置" "warn"
-        cpu_level="weak"
-    fi
-    
-    echo "CPU性能: $cpu_level"
-    
-    # 获取最优配置
-    local config=$(get_optimal_zram_config "$mem_mb" "$cpu_level" "$cores")
-    local algorithm=$(echo "$config" | cut -d, -f1)
-    local device_type=$(echo "$config" | cut -d, -f2)
-    local multiplier=$(echo "$config" | cut -d, -f3)
-    
-    # 计算zram大小
-    local target_size_mb
-    if command -v bc >/dev/null 2>&1 && target_size_mb=$(awk "BEGIN {printf \"%.0f\", $mem_mb * $multiplier}" 2>/dev/null); then
-        debug_log "目标大小计算: ${mem_mb}MB * $multiplier = ${target_size_mb}MB"
-    else
-        # 备用计算
-        local int_multiplier=$(echo "$multiplier" | cut -d. -f1)
-        local decimal_part=$(echo "$multiplier" | cut -d. -f2 2>/dev/null || echo "0")
-        if [[ ${#decimal_part} -eq 1 ]]; then
-            decimal_part="${decimal_part}0"
-        fi
-        target_size_mb=$(( (mem_mb * ${int_multiplier:-1}) + (mem_mb * ${decimal_part:-0} / 100) ))
-        debug_log "使用整数计算: $target_size_mb"
-    fi
-    
-    # 检查现有zram是否合适 - 关键修复
-    local current_zram_devices=0
-    local zram_output
-    if zram_output=$(swapon --show 2>/dev/null); then
-        current_zram_devices=$(echo "$zram_output" | grep -c "zram" 2>/dev/null || echo "0")
-    fi
-    
-    # 确保变量安全
-    current_zram_devices=$(echo "$current_zram_devices" | tr -cd '0-9' | head -c 10)
-    current_zram_devices=${current_zram_devices:-0}
-    
-    debug_log "当前zram设备数量: $current_zram_devices"
-    
-    # 检查现有配置是否匹配
-    if [[ "$current_zram_devices" =~ ^[0-9]+$ ]] && [[ "$current_zram_devices" -gt 0 ]]; then
-        # 计算当前zram总大小
-        local current_total_mb=0
-        while read -r device _ size _; do
-            [[ "$device" == *"zram"* ]] || continue
-            local current_mb=$(convert_to_mb "$size")
-            current_total_mb=$((current_total_mb + current_mb))
-        done < <(swapon --show 2>/dev/null | grep zram)
-        
-        # 检查配置是否匹配
-        local min_acceptable=$((target_size_mb * 90 / 100))
-        local max_acceptable=$((target_size_mb * 110 / 100))
-        local expected_device_count=1
-        [[ "$device_type" == "multi" ]] && expected_device_count=$((cores > 4 ? 4 : cores))
-        
-        debug_log "当前: ${current_total_mb}MB/${current_zram_devices}设备, 期望: ${target_size_mb}MB/${expected_device_count}设备"
-        
-        # 配置匹配检查
-        if (( current_total_mb >= min_acceptable && 
-              current_total_mb <= max_acceptable && 
-              current_zram_devices == expected_device_count )); then
-            # 配置匹配，只调整优先级
-            local params_result=$(set_system_parameters "$mem_mb" "$current_zram_devices")
-            local priority=$(echo "$params_result" | cut -d, -f1)
-            
-            local display_size=$(format_size "$current_total_mb")
-            local device_desc
-            if (( current_zram_devices > 1 )); then
-                device_desc="${current_zram_devices}设备"
-            else
-                device_desc="单设备"
-            fi
-            echo "Zram: $display_size ($algorithm, ${device_desc}, 优先级$priority, 已配置)"
-            show_swap_status
-            return 0
-        else
-            # 配置不匹配，需要重新配置
-            echo "现有配置不匹配，重新配置..."
-            cleanup_zram_completely  # 关键：彻底清理
-        fi
-    fi
-    
-    # 配置新的zram
-    local device_count=1 actual_size_mb config_success=false
-    
-    if [[ "$device_type" == "multi" ]]; then
-        if device_count=$(setup_multiple_zram "$target_size_mb" "$algorithm" "$cores"); then
-            config_success=true
-            actual_size_mb="$target_size_mb"
-        else
-            log "多设备配置失败，回退到单设备" "warn"
-            cleanup_zram_completely
-            device_type="single"
-        fi
-    fi
-    
-    if [[ "$device_type" == "single" ]]; then
-        if setup_single_zram "$target_size_mb" "$algorithm"; then
-            # 验证配置成功
-            if swapon --show 2>/dev/null | grep -q zram0; then
-                config_success=true
-                local current_size=$(swapon --show 2>/dev/null | grep zram0 | awk '{print $3}')
-                actual_size_mb=$(convert_to_mb "$current_size")
-            else
-                log "Zram启动验证失败" "error"
-                return 1
-            fi
-        else
-            log "Zram配置失败" "error"
-            return 1
-        fi
-    fi
-    
-    # 设置优先级和显示结果
-    if [[ "$config_success" == "true" ]]; then
-        local params_result=$(set_system_parameters "$mem_mb" "$device_count")
-        local priority=$(echo "$params_result" | cut -d, -f1)
-        
-        local display_size=$(format_size "$actual_size_mb")
-        local device_desc
-        if (( device_count > 1 )); then
-            device_desc="${device_count}设备"
-        else
-            device_desc="单设备"
-        fi
-        echo "Zram: $display_size ($algorithm, ${device_desc}, 优先级$priority)"
-        show_swap_status
-    fi
-}
+# --- 时区和时间同步 ---
 
 # 配置时区
 setup_timezone() {
-    local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null)
+    log "info" "正在配置时区..."
+    local current_tz
+    current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "未知")
     
-    read -p "时区设置 [1=上海 2=UTC 3=东京 4=伦敦 5=纽约 6=自定义 7=保持] (默认1): " choice </dev/tty >&2
+    # 使用更清晰的菜单
+    echo "请选择您的时区:"
+    echo "  1) Asia/Shanghai (默认)"
+    echo "  2) UTC"
+    echo "  3) Asia/Tokyo"
+    echo "  4) Europe/London"
+    echo "  5) America/New_York"
+    echo "  6) 自定义输入"
+    echo "  7) 保持当前 ($current_tz)"
+    
+    read -rp "输入选项 [1-7]: " choice < /dev/tty
     choice=${choice:-1}
     
-    local target_tz
+    local target_tz=""
     case "$choice" in
         1) target_tz="Asia/Shanghai" ;;
         2) target_tz="UTC" ;;
         3) target_tz="Asia/Tokyo" ;;
         4) target_tz="Europe/London" ;;
         5) target_tz="America/New_York" ;;
-        6) 
-            read -p "输入时区 (如: Asia/Shanghai): " target_tz </dev/tty >&2
-            if ! timedatectl list-timezones | grep -q "^$target_tz$"; then
-                log "无效时区，使用默认" "warn"
-                target_tz="$DEFAULT_TIMEZONE"
-            fi
-            ;;
-        7) 
-            echo "时区: $current_tz (保持不变)"
-            return 0
-            ;;
-        *) 
-            target_tz="$DEFAULT_TIMEZONE"
-            ;;
+        6) read -rp "请输入时区 (例如: Europe/Paris): " target_tz < /dev/tty ;;
+        7) log "info" "时区保持不变。"; return 0 ;;
+        *) log "warn" "无效选择，使用默认值 Asia/Shanghai。"; target_tz="Asia/Shanghai" ;;
     esac
-    
-    if [[ "$current_tz" != "$target_tz" ]]; then
-        timedatectl set-timezone "$target_tz" 2>/dev/null || {
-            log "设置时区失败" "error"
-            return 1
-        }
+
+    if [[ -z "$target_tz" ]]; then
+        log "warn" "未输入时区，操作取消。"
+        return
     fi
-    
-    echo "时区: $target_tz"
+
+    if ! timedatectl set-timezone "$target_tz"; then
+        log "error" "设置时区 '$target_tz' 失败。请检查时区名称是否正确。"
+    else
+        log "ok" "时区已设置为: $target_tz"
+    fi
 }
 
-# 配置Chrony
+# 配置时间同步
 setup_chrony() {
-    if command -v chronyd &>/dev/null && systemctl is-active chrony &>/dev/null 2>&1; then
-        local sync_status=$(chronyc tracking 2>/dev/null | awk '/System clock synchronized/{print $4}' || echo "no")
-        if [[ "$sync_status" == "yes" ]]; then
-            echo "时间同步: Chrony (已同步)"
-            return 0
-        fi
+    log "info" "正在配置时间同步服务 (Chrony)..."
+    
+    # 停用可能冲突的systemd-timesyncd
+    if systemctl is-active --quiet systemd-timesyncd; then
+        systemctl stop systemd-timesyncd
+        systemctl disable systemd-timesyncd
+        log "debug" "已停用 systemd-timesyncd。"
     fi
-    
-    # 停用冲突服务
-    systemctl stop systemd-timesyncd 2>/dev/null || true
-    systemctl disable systemd-timesyncd 2>/dev/null || true
-    
-    # 安装chrony
-    if ! command -v chronyd &>/dev/null; then
-        apt-get install -y chrony >/dev/null 2>&1 || {
-            log "Chrony安装失败" "error"
-            return 1
-        }
+
+    install_packages chrony
+
+    if ! systemctl is-enabled --quiet chrony; then
+        systemctl enable chrony &>/dev/null
     fi
-    
-    # 启动服务
-    systemctl enable chrony >/dev/null 2>&1 || true
-    systemctl start chrony >/dev/null 2>&1 || true
-    
-    sleep 2
-    if systemctl is-active chrony &>/dev/null; then
-        local sources_count=$(chronyc sources 2>/dev/null | grep -c "^\^" || echo "0")
-        echo "时间同步: Chrony (${sources_count}个时间源)"
-    else
-        log "Chrony启动失败" "error"
+
+    if ! systemctl restart chrony; then
+        log "error" "启动Chrony服务失败。"
         return 1
     fi
+    
+    log "info" "等待Chrony与上游服务器同步..."
+    sleep 5 # 等待chrony初始化
+
+    if chronyc tracking | grep -q "System clock synchronized.*yes"; then
+        local stratum
+        stratum=$(chronyc tracking | awk '/Stratum/ {print $2}')
+        log "ok" "时间同步成功 (Chrony, Stratum: $stratum)。"
+    else
+        log "warn" "Chrony正在运行，但尚未与时间服务器同步。这可能需要几分钟。"
+    fi
 }
 
-# === 主流程 ===
+# --- 主流程 ---
 main() {
-    # 检查root权限
-    [[ $EUID -eq 0 ]] || {
-        log "需要root权限运行" "error"
-        exit 1
-    }
+    # 权限检查
+    [[ $EUID -eq 0 ]] || { log "error" "此脚本需要root权限运行。"; exit 1; }
     
-    # 检查包管理器锁定状态
-    local wait_count=0
-    while [[ $wait_count -lt 6 ]]; do
-        if timeout 10s apt-get update -qq 2>/dev/null; then
-            break
-        else
-            if [[ $wait_count -eq 0 ]]; then
-                log "检测到包管理器被锁定，等待释放..." "warn"
-            fi
-            sleep 10
-            wait_count=$((wait_count + 1))
-        fi
-    done
+    print_banner
     
-    if [[ $wait_count -ge 6 ]]; then
-        log "包管理器锁定超时，请检查是否有其他apt进程运行" "error"
-        exit 1
+    # 检查网络连接
+    if ! ping -c 1 pool.ntp.org &>/dev/null; then
+        log "warn" "无法访问外部网络。软件包安装和时间同步可能会失败。"
     fi
     
-    # 检查和安装必要命令
-    for cmd in awk swapon systemctl; do
-        command -v "$cmd" &>/dev/null || {
-            log "缺少必要命令: $cmd" "error"
-            exit 1
-        }
+    # 检查并等待apt锁
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        log "warn" "检测到apt被锁定，等待10秒后重试..."
+        sleep 10
     done
+
+    # 确保核心工具存在
+    install_packages bc util-linux procps
     
-    # 安装bc（如果需要）
-    if ! command -v bc &>/dev/null; then
-        log "安装必需的依赖: bc" "info"
-        apt-get install -y bc >/dev/null 2>&1 || {
-            log "bc安装失败，将使用备用计算方法" "warn"
-        }
-    fi
-    
-    # 避免分页器问题
-    export SYSTEMD_PAGER=""
-    export PAGER=""
-    
-    log "🔧 智能系统优化配置..." "info"
-    
+    # 执行优化
+    setup_zram
     echo
-    setup_zram || log "Zram配置失败，继续其他配置" "warn"
-    
+    setup_timezone
     echo
-    setup_timezone || log "时区配置失败" "warn"
-    
-    echo  
-    setup_chrony || log "时间同步配置失败" "warn"
-    
-    echo
-    log "✅ 优化完成" "info"
+    setup_chrony
     
     # 显示最终状态
-    if [[ "${DEBUG:-}" == "1" ]]; then
-        echo
-        log "=== 系统状态 ===" "debug"
-        free -h | head -2
-        swapon --show 2>/dev/null || echo "无swap设备"
-        echo "swappiness: $(cat /proc/sys/vm/swappiness 2>/dev/null || echo 'unknown')"
-    fi
+    echo
+    log "info" "--- 系统最终状态摘要 ---"
+    log "ok" "Swap 状态:"
+    swapon --show
+    local final_swappiness
+    final_swappiness=$(cat /proc/sys/vm/swappiness)
+    log "ok" "内核参数: vm.swappiness = $final_swappiness"
+    log "ok" "当前时间:"
+    timedatectl status | head -n 3
+    echo
+    log "ok" "✅ 所有优化任务已完成。"
 }
 
-# 错误处理
-trap 'log "脚本执行出错，行号: $LINENO" "error"; exit 1' ERR
-
+# 运行主函数
 main "$@"
