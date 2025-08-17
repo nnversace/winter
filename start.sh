@@ -114,36 +114,60 @@ check_network() {
 install_dependencies() {
     log "安装基础依赖"
     
-    local required_packages=(
-        "curl"
-        "wget" 
-        "git"
-        "jq"
-        "rsync"
-        "sudo"
-        "dnsutils"
-        "unzip"
-        "tar"
-        "sed"
-        "grep"
-        "awk"
+    # 使用命令检查而不是包名检查
+    local required_deps=(
+        "curl:curl"
+        "wget:wget" 
+        "git:git"
+        "jq:jq"
+        "rsync:rsync"
+        "sudo:sudo"
+        "dig:dnsutils"
+        "unzip:unzip"
+        "tar:tar"
+        "awk:gawk"
+        "free:procps"
     )
     
     apt-get update -qq || log "软件包列表更新失败" "warn"
     
     local missing_packages=()
-    for pkg in "${required_packages[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $pkg "; then
-            missing_packages+=("$pkg")
+    
+    for dep_pair in "${required_deps[@]}"; do
+        local check_cmd="${dep_pair%:*}"
+        local package_name="${dep_pair#*:}"
+        
+        if ! command -v "$check_cmd" >/dev/null 2>&1; then
+            missing_packages+=("$package_name")
         fi
     done
     
+    # 去重
     if (( ${#missing_packages[@]} > 0 )); then
-        log "安装缺失依赖: ${missing_packages[*]}"
-        apt-get install -y "${missing_packages[@]}" || {
-            log "依赖安装失败" "error"
-            exit 1
-        }
+        local unique_packages=($(printf '%s\n' "${missing_packages[@]}" | sort -u))
+        log "安装缺失依赖: ${unique_packages[*]}"
+        
+        # 分批安装，避免单个包失败影响全部
+        local failed_packages=()
+        for pkg in "${unique_packages[@]}"; do
+            if ! apt-get install -y "$pkg" >/dev/null 2>&1; then
+                failed_packages+=("$pkg")
+                log "包 $pkg 安装失败" "warn"
+            fi
+        done
+        
+        # 检查关键依赖
+        local critical_deps=("curl" "wget" "unzip")
+        for cmd in "${critical_deps[@]}"; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+                log "关键依赖 $cmd 缺失" "error"
+                exit 1
+            fi
+        done
+        
+        if (( ${#failed_packages[@]} > 0 )); then
+            log "部分依赖安装失败: ${failed_packages[*]}，继续执行" "warn"
+        fi
     fi
     
     log "依赖检查完成"
@@ -261,13 +285,29 @@ module_tools_setup() {
         "neofetch"
         "net-tools"
         "iperf3"
+        "vim"
+        "nano"
     )
     
-    apt-get install -y "${tools_packages[@]}" || log "部分工具安装失败" "warn"
+    log "安装常用系统工具..."
+    local failed_tools=()
+    
+    for tool in "${tools_packages[@]}"; do
+        if apt-get install -y "$tool" >/dev/null 2>&1; then
+            log "✓ $tool 安装成功"
+        else
+            failed_tools+=("$tool")
+            log "✗ $tool 安装失败" "warn"
+        fi
+    done
+    
+    if (( ${#failed_tools[@]} > 0 )); then
+        log "部分工具安装失败: ${failed_tools[*]}" "warn"
+    fi
     
     # 安装 NextTrace
     if ! command -v nexttrace &>/dev/null; then
-        log "安装 NextTrace..."
+        log "安装 NextTrace 网络追踪工具..."
         local arch=$(uname -m)
         local download_arch=""
         
@@ -275,21 +315,99 @@ module_tools_setup() {
             x86_64) download_arch="amd64" ;;
             aarch64) download_arch="arm64" ;;
             armv7l) download_arch="armv7" ;;
+            armv6l) download_arch="armv6" ;;
             *) download_arch="amd64" ;;
         esac
         
         local nexttrace_url="https://github.com/sjlleo/nexttrace/releases/latest/download/nexttrace_linux_${download_arch}"
-        curl -fsSL "$nexttrace_url" -o /usr/local/bin/nexttrace && chmod +x /usr/local/bin/nexttrace || log "NextTrace 安装失败" "warn"
+        
+        if curl -fsSL --connect-timeout 10 --max-time 60 "$nexttrace_url" -o /usr/local/bin/nexttrace 2>/dev/null && \
+           chmod +x /usr/local/bin/nexttrace 2>/dev/null; then
+            log "NextTrace 安装成功"
+        else
+            log "NextTrace 安装失败" "warn"
+        fi
+    else
+        log "NextTrace 已安装"
     fi
     
     # 安装 SpeedTest CLI
     if ! command -v speedtest &>/dev/null; then
         log "安装 SpeedTest CLI..."
-        curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash >/dev/null 2>&1 || true
-        apt-get install -y speedtest >/dev/null 2>&1 || log "SpeedTest 安装失败" "warn"
+        
+        # 方法1: 官方安装脚本
+        if curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh 2>/dev/null | bash >/dev/null 2>&1; then
+            if apt-get install -y speedtest >/dev/null 2>&1; then
+                log "SpeedTest CLI 安装成功"
+            else
+                log "SpeedTest CLI 官方源安装失败，尝试其他方法" "warn"
+                
+                # 方法2: 直接下载二进制
+                local speedtest_arch=""
+                case "$(uname -m)" in
+                    x86_64) speedtest_arch="x86_64" ;;
+                    aarch64) speedtest_arch="aarch64" ;;
+                    armv7l) speedtest_arch="armhf" ;;
+                    *) speedtest_arch="x86_64" ;;
+                esac
+                
+                local speedtest_url="https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${speedtest_arch}.tgz"
+                local tmpdir=$(mktemp -d)
+                
+                if curl -fsSL "$speedtest_url" -o "${tmpdir}/speedtest.tgz" 2>/dev/null && \
+                   tar -xzf "${tmpdir}/speedtest.tgz" -C "$tmpdir" 2>/dev/null && \
+                   install -m 0755 "${tmpdir}/speedtest" /usr/local/bin/speedtest 2>/dev/null; then
+                    log "SpeedTest CLI (二进制) 安装成功"
+                else
+                    log "SpeedTest CLI 安装失败" "warn"
+                fi
+                
+                rm -rf "$tmpdir" 2>/dev/null || true
+            fi
+        else
+            log "无法访问 SpeedTest 官方源" "warn"
+        fi
+    else
+        log "SpeedTest CLI 已安装"
     fi
     
+    # 安装其他有用工具
+    local extra_tools=(
+        "curl:curl"
+        "wget:wget"
+        "lsof:lsof"
+        "tcpdump:tcpdump"
+        "nmap:nmap"
+    )
+    
+    log "安装额外工具..."
+    for tool_pair in "${extra_tools[@]}"; do
+        local cmd="${tool_pair%:*}"
+        local pkg="${tool_pair#*:}"
+        
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            if apt-get install -y "$pkg" >/dev/null 2>&1; then
+                log "✓ $pkg 安装成功"
+            else
+                log "✗ $pkg 安装失败" "warn"
+            fi
+        fi
+    done
+    
     log "系统工具安装完成"
+    
+    # 显示安装结果
+    local installed_tools=()
+    command -v htop >/dev/null 2>&1 && installed_tools+=("htop")
+    command -v tree >/dev/null 2>&1 && installed_tools+=("tree")
+    command -v neofetch >/dev/null 2>&1 && installed_tools+=("neofetch")
+    command -v nexttrace >/dev/null 2>&1 && installed_tools+=("NextTrace")
+    command -v speedtest >/dev/null 2>&1 && installed_tools+=("SpeedTest")
+    command -v nmap >/dev/null 2>&1 && installed_tools+=("nmap")
+    
+    if (( ${#installed_tools[@]} > 0 )); then
+        log "已安装工具: ${installed_tools[*]}"
+    fi
 }
 
 #--- 自动更新模块 ---
@@ -354,6 +472,23 @@ module_mosdns_setup() {
     local workdir="/etc/mosdns"
     local conf="${workdir}/config.yaml"
     
+    # 检查是否已安装
+    if command -v mosdns &>/dev/null; then
+        local version=$(mosdns version 2>/dev/null | head -1 || echo "已安装")
+        log "MosDNS-x 已安装: $version"
+        return 0
+    fi
+    
+    # 询问是否安装
+    echo
+    read -p "MosDNS-x 是一个高性能 DNS 服务器，是否安装？[Y/n]: " -r install_choice
+    install_choice=${install_choice:-Y}
+    
+    if [[ ! "$install_choice" =~ ^[Yy]$ ]]; then
+        log "跳过 MosDNS-x 安装"
+        return 0
+    fi
+    
     # 检测架构
     local arch=$(uname -m)
     local normalized_arch=""
@@ -362,83 +497,148 @@ module_mosdns_setup() {
         x86_64|amd64) normalized_arch="linux-amd64" ;;
         aarch64|arm64) normalized_arch="linux-arm64" ;;
         armv7l|armv7) normalized_arch="linux-arm-7" ;;
-        *) normalized_arch="linux-amd64" ;;
+        armv6l|armv6) normalized_arch="linux-arm-6" ;;
+        *) 
+            log "不支持的架构: $arch，跳过安装" "warn"
+            return 0
+            ;;
     esac
-    
-    if command -v mosdns &>/dev/null; then
-        log "MosDNS-x 已安装，跳过"
-        return 0
-    fi
     
     mkdir -p "$workdir"
     
     # 获取最新版本下载链接
+    log "获取 MosDNS-x 最新版本..."
     local api_url="https://api.github.com/repos/${repo}/releases/latest"
-    local download_url=$(curl -fsSL "$api_url" | grep -oE "\"browser_download_url\": *\"[^\"]+mosdns-${normalized_arch}\.zip\"" | head -n1 | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/')
+    local download_url=""
+    
+    # 尝试获取下载链接
+    if command -v curl >/dev/null 2>&1; then
+        download_url=$(curl -fsSL --connect-timeout 10 --max-time 30 "$api_url" 2>/dev/null | \
+            grep -oE "\"browser_download_url\": *\"[^\"]+mosdns-${normalized_arch}\.zip\"" | \
+            head -n1 | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/' || echo "")
+    fi
     
     if [[ -z "$download_url" ]]; then
-        log "无法获取 MosDNS-x 下载链接" "error"
-        return 1
+        log "无法获取 MosDNS-x 下载链接，可能是网络问题" "warn"
+        return 0
     fi
     
     log "下载 MosDNS-x..."
     local tmpdir=$(mktemp -d)
     local zipfile="${tmpdir}/mosdns.zip"
     
-    curl -fSL "$download_url" -o "$zipfile" || {
-        log "MosDNS-x 下载失败" "error"
+    if ! curl -fSL --connect-timeout 15 --max-time 300 "$download_url" -o "$zipfile"; then
+        log "MosDNS-x 下载失败" "warn"
         rm -rf "$tmpdir"
-        return 1
-    }
+        return 0
+    fi
+    
+    # 检查下载文件
+    if [[ ! -s "$zipfile" ]]; then
+        log "下载的文件为空" "warn"
+        rm -rf "$tmpdir"
+        return 0
+    fi
     
     # 解压安装
-    unzip -o "$zipfile" -d "$tmpdir" >/dev/null
+    log "解压并安装 MosDNS-x..."
+    if ! unzip -q "$zipfile" -d "$tmpdir" 2>/dev/null; then
+        log "解压 MosDNS-x 失败" "warn"
+        rm -rf "$tmpdir"
+        return 0
+    fi
     
     local mosdns_bin=""
     if [[ -f "${tmpdir}/mosdns" ]]; then
         mosdns_bin="${tmpdir}/mosdns"
     else
-        mosdns_bin=$(find "$tmpdir" -maxdepth 2 -type f -name mosdns | head -n1)
+        mosdns_bin=$(find "$tmpdir" -maxdepth 2 -type f -name mosdns 2>/dev/null | head -n1)
     fi
     
-    if [[ -z "$mosdns_bin" ]]; then
-        log "解压包内未找到 mosdns" "error"
+    if [[ -z "$mosdns_bin" || ! -f "$mosdns_bin" ]]; then
+        log "解压包内未找到 mosdns 可执行文件" "warn"
         rm -rf "$tmpdir"
-        return 1
+        return 0
     fi
     
-    install -m 0755 "$mosdns_bin" "$bin"
+    # 安装二进制文件
+    if install -m 0755 "$mosdns_bin" "$bin" 2>/dev/null; then
+        log "MosDNS-x 二进制文件安装成功"
+    else
+        log "MosDNS-x 安装失败" "warn"
+        rm -rf "$tmpdir"
+        return 0
+    fi
+    
     rm -rf "$tmpdir"
     
     # 创建基础配置
     if [[ ! -f "$conf" ]]; then
         cat > "$conf" << 'EOF'
+# MosDNS 基础配置
 plugins:
-  - tag: fwd
-    type: fast_forward
+  - tag: forward_local
+    type: forward
     args:
+      concurrent: 2
       upstreams:
         - addr: 223.5.5.5
           enable_pipeline: true
         - addr: 119.29.29.29
           enable_pipeline: true
+          
+  - tag: forward_remote  
+    type: forward
+    args:
+      concurrent: 2
+      upstreams:
         - addr: 1.1.1.1
           enable_pipeline: true
+        - addr: 8.8.8.8
+          enable_pipeline: true
+
+  - tag: main_sequence
+    type: sequence
+    args:
+      - exec: forward_local
+      - if: "resp_rcode 2"
+        exec: forward_remote
+
 servers:
-  - exec: fwd
+  - exec: main_sequence
     listeners:
       - protocol: udp
-        addr: 0.0.0.0:53
-      - protocol: tcp
-        addr: 0.0.0.0:53
+        addr: "0.0.0.0:53"
+      - protocol: tcp  
+        addr: "0.0.0.0:53"
 EOF
+        log "MosDNS-x 配置文件创建完成"
     fi
     
     # 安装系统服务
-    "$bin" service install -d "$workdir" -c "$conf" >/dev/null 2>&1 || true
-    "$bin" service start >/dev/null 2>&1 || true
+    log "配置 MosDNS-x 系统服务..."
+    if "$bin" service install -d "$workdir" -c "$conf" >/dev/null 2>&1; then
+        log "MosDNS-x 服务注册成功"
+        
+        # 尝试启动服务
+        if "$bin" service start >/dev/null 2>&1; then
+            log "MosDNS-x 服务启动成功"
+        else
+            log "MosDNS-x 服务启动失败，请检查配置" "warn"
+        fi
+    else
+        log "MosDNS-x 服务注册失败" "warn"
+    fi
     
     log "MosDNS-x 安装完成"
+    
+    # 显示状态
+    if command -v mosdns >/dev/null 2>&1; then
+        local version=$(mosdns version 2>/dev/null | head -1 || echo "未知版本")
+        log "已安装版本: $version"
+        log "配置文件: $conf"
+        log "管理命令: systemctl {start|stop|restart|status} mosdns"
+    fi
 }
 
 #--- 内核优化模块 ---
@@ -910,8 +1110,29 @@ main() {
     
     # 系统更新
     log "系统更新"
-    apt-get update -qq >/dev/null 2>&1 || log "软件包列表更新失败" "warn"
-    apt-get upgrade -y >/dev/null 2>&1 || log "系统升级失败" "warn"
+    
+    # 更新软件包列表
+    if apt-get update -qq 2>/dev/null; then
+        log "软件包列表更新成功"
+    else
+        log "软件包列表更新失败，继续执行" "warn"
+    fi
+    
+    # 询问是否升级系统
+    echo
+    read -p "是否升级系统软件包？建议升级以确保安全性 [Y/n]: " -r upgrade_choice
+    upgrade_choice=${upgrade_choice:-Y}
+    
+    if [[ "$upgrade_choice" =~ ^[Yy]$ ]]; then
+        log "正在升级系统软件包..."
+        if DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold >/dev/null 2>&1; then
+            log "系统升级完成"
+        else
+            log "系统升级失败，但继续执行配置" "warn"
+        fi
+    else
+        log "跳过系统升级"
+    fi
     
     # 模块选择
     select_modules
