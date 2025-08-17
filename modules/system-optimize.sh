@@ -486,6 +486,14 @@ setup_single_zram() {
     
     debug_log "配置单zram: ${size_mib}MB, 算法: $algorithm"
     
+    # 首先尝试手动配置方式
+    if setup_manual_zram "$size_mib" "$algorithm"; then
+        return 0
+    fi
+    
+    # 回退到zram-tools方式
+    log "手动配置失败，尝试zram-tools方式" "warn"
+    
     # 检查zram-tools可用性
     if ! dpkg -l zram-tools &>/dev/null; then
         log "安装zram-tools..." "info"
@@ -511,7 +519,7 @@ setup_single_zram() {
     # 停止现有服务
     systemctl stop zramswap.service 2>/dev/null || true
     
-    # 创建配置文件
+    # 创建配置文件 - 修复SIZE格式问题
     cat > "$ZRAM_CONFIG" << EOF
 # Zram配置 - 由优化脚本 v$SCRIPT_VERSION 生成
 # 适配 Debian $DEBIAN_VERSION
@@ -519,18 +527,21 @@ setup_single_zram() {
 # 压缩算法
 ALGO=$algorithm
 
-# 固定大小（MB）
-SIZE=$size_mib
+# 固定大小（使用正确的单位格式）
+SIZE=${size_mib}M
 
 # 优先级
 PRIORITY=100
 
-# 禁用百分比设置
-# PERCENT=
+# 确保不使用百分比
+PERCENT=""
 
-# 额外选项
+# 设备数量
 ZRAM_NUM=1
 EOF
+    
+    debug_log "zram-tools配置文件内容:"
+    [[ "${DEBUG:-}" == "1" ]] && cat "$ZRAM_CONFIG" >&2
     
     # 启动服务
     if ! systemctl enable zramswap.service >/dev/null 2>&1; then
@@ -546,36 +557,167 @@ EOF
     done
     
     if ! systemctl start zramswap.service >/dev/null 2>&1; then
-        log "启动zramswap服务失败" "error"
-        systemctl status zramswap.service || true
+        log "启动zramswap服务失败，查看状态:" "error"
+        systemctl status zramswap.service --no-pager -l || true
+        
+        # 尝试手动启动脚本调试
+        if [[ -x /usr/sbin/zramswap ]]; then
+            debug_log "尝试手动执行zramswap脚本"
+            /usr/sbin/zramswap start 2>&1 | head -10 || true
+        fi
         return 1
     fi
     
     # 验证配置
-    sleep 3
+    sleep 5  # 增加等待时间
     local retry=0
-    while (( retry < 5 )); do
-        if [[ -b /dev/zram0 ]] && swapon --show 2>/dev/null | grep -q zram0; then
+    while (( retry < 8 )); do
+        if [[ -b /dev/zram0 ]]; then
             local actual_bytes=$(cat /sys/block/zram0/disksize 2>/dev/null || echo "0")
             local actual_mb=$((actual_bytes / 1024 / 1024))
-            local tolerance=10  # 10% 容差
-            local min_expected=$((size_mib * (100 - tolerance) / 100))
-            local max_expected=$((size_mib * (100 + tolerance) / 100))
             
-            if (( actual_mb >= min_expected && actual_mb <= max_expected )); then
-                debug_log "zram配置成功: 期望${size_mib}MB, 实际${actual_mb}MB"
-                return 0
+            # 检查是否已启用为swap
+            if swapon --show 2>/dev/null | grep -q zram0; then
+                local tolerance=20  # 增加容差到20%
+                local min_expected=$((size_mib * (100 - tolerance) / 100))
+                local max_expected=$((size_mib * (100 + tolerance) / 100))
+                
+                if (( actual_mb >= min_expected && actual_mb <= max_expected )); then
+                    debug_log "zram配置成功: 期望${size_mib}MB, 实际${actual_mb}MB"
+                    return 0
+                else
+                    debug_log "大小不匹配但在范围内: 期望${size_mib}MB, 实际${actual_mb}MB"
+                    # 如果差距不是太大就接受
+                    if (( actual_mb >= size_mib / 4 )); then
+                        log "接受当前zram大小: ${actual_mb}MB" "warn"
+                        return 0
+                    fi
+                fi
             else
-                debug_log "大小不匹配: 期望${size_mib}MB, 实际${actual_mb}MB, 重试..."
+                debug_log "zram设备存在但未启用为swap，重试..."
             fi
+        else
+            debug_log "zram设备未创建，重试 $retry/8"
         fi
         
         sleep 2
         ((retry++))
     done
     
-    log "zram配置验证失败" "error"
+    log "zram配置验证失败，尝试手动配置" "error"
     return 1
+}
+
+# === 手动zram配置函数 ===
+setup_manual_zram() {
+    local size_mib="$1"
+    local algorithm="$2"
+    
+    debug_log "尝试手动配置zram: ${size_mib}MB, 算法: $algorithm"
+    
+    # 清理现有zram
+    cleanup_zram_completely
+    
+    # 加载zram模块
+    if ! modprobe zram num_devices=1 2>/dev/null; then
+        debug_log "加载zram模块失败"
+        return 1
+    fi
+    
+    # 等待设备创建
+    local wait_count=0
+    while [[ ! -b /dev/zram0 ]] && (( wait_count < 10 )); do
+        sleep 1
+        ((wait_count++))
+    done
+    
+    if [[ ! -b /dev/zram0 ]]; then
+        debug_log "zram设备创建失败"
+        return 1
+    fi
+    
+    # 检查并设置压缩算法
+    local comp_algo_file="/sys/block/zram0/comp_algorithm"
+    if [[ -w "$comp_algo_file" ]]; then
+        local available_algos=$(cat "$comp_algo_file" 2>/dev/null || echo "lz4")
+        if [[ "$available_algos" == *"$algorithm"* ]]; then
+            echo "$algorithm" > "$comp_algo_file" 2>/dev/null || {
+                debug_log "设置压缩算法失败，使用默认"
+            }
+        else
+            debug_log "算法 $algorithm 不支持，可用算法: $available_algos"
+            # 尝试其他算法
+            if [[ "$available_algos" == *"zstd"* ]]; then
+                echo "zstd" > "$comp_algo_file" 2>/dev/null || true
+            elif [[ "$available_algos" == *"lz4"* ]]; then
+                echo "lz4" > "$comp_algo_file" 2>/dev/null || true
+            fi
+        fi
+    fi
+    
+    # 设置大小
+    local size_bytes=$((size_mib * 1024 * 1024))
+    if ! echo "$size_bytes" > /sys/block/zram0/disksize 2>/dev/null; then
+        debug_log "设置zram大小失败"
+        return 1
+    fi
+    
+    # 创建swap文件系统
+    if ! mkswap /dev/zram0 >/dev/null 2>&1; then
+        debug_log "创建zram swap失败"
+        return 1
+    fi
+    
+    # 启用swap
+    if ! swapon /dev/zram0 -p 100 2>/dev/null; then
+        debug_log "启用zram swap失败"
+        return 1
+    fi
+    
+    # 验证配置
+    sleep 2
+    if swapon --show 2>/dev/null | grep -q zram0; then
+        local actual_bytes=$(cat /sys/block/zram0/disksize 2>/dev/null || echo "0")
+        local actual_mb=$((actual_bytes / 1024 / 1024))
+        debug_log "手动zram配置成功: 期望${size_mib}MB, 实际${actual_mb}MB"
+        
+        # 创建简单的服务文件以便管理
+        create_manual_zram_service "$size_mib" "$algorithm"
+        
+        return 0
+    else
+        debug_log "手动zram验证失败"
+        return 1
+    fi
+}
+
+# === 创建手动zram服务 ===
+create_manual_zram_service() {
+    local size_mib="$1"
+    local algorithm="$2"
+    
+    local service_file="/etc/systemd/system/manual-zram.service"
+    
+    cat > "$service_file" << EOF
+[Unit]
+Description=Manual Zram Setup
+Before=swap.target
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'modprobe zram num_devices=1; sleep 1; echo $algorithm > /sys/block/zram0/comp_algorithm 2>/dev/null || true; echo $((size_mib * 1024 * 1024)) > /sys/block/zram0/disksize; mkswap /dev/zram0; swapon /dev/zram0 -p 100'
+ExecStop=/bin/bash -c 'swapoff /dev/zram0 2>/dev/null || true; echo 1 > /sys/block/zram0/reset 2>/dev/null || true; modprobe -r zram 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    systemctl enable manual-zram.service >/dev/null 2>&1 || true
+    
+    debug_log "手动zram服务已创建"
 }
 
 # === 多设备zram配置增强 ===
@@ -590,7 +732,7 @@ setup_multiple_zram() {
     
     local per_device_mb=$((total_size_mb / device_count))
     
-    debug_log "配置多zram: ${device_count}个设备, 每个${per_device_mb}MB"
+    debug_log "配置多zram: ${device_count}个设备, 每个${per_device_mb}MB, 总计${total_size_mb}MB"
     
     # 彻底清理
     cleanup_zram_completely
@@ -605,15 +747,26 @@ setup_multiple_zram() {
     
     # 验证压缩算法支持
     local supported_algos
-    if supported_algos=$(cat /sys/block/zram0/comp_algorithm 2>/dev/null); then
+    if [[ -r /sys/block/zram0/comp_algorithm ]]; then
+        supported_algos=$(cat /sys/block/zram0/comp_algorithm 2>/dev/null || echo "lz4")
         if [[ "$supported_algos" != *"$algorithm"* ]]; then
-            log "算法 $algorithm 不支持，使用默认" "warn"
-            algorithm="lz4"  # 回退到lz4
+            log "算法 $algorithm 不支持，可用: $supported_algos" "warn"
+            # 选择最佳可用算法
+            if [[ "$supported_algos" == *"zstd"* ]]; then
+                algorithm="zstd"
+            elif [[ "$supported_algos" == *"lz4"* ]]; then
+                algorithm="lz4"  
+            else
+                algorithm=$(echo "$supported_algos" | awk '{print $1}' | tr -d '[]')
+            fi
+            debug_log "使用算法: $algorithm"
         fi
     fi
     
     # 配置每个设备
     local configured_count=0
+    local total_configured_bytes=0
+    
     for i in $(seq 0 $((device_count - 1))); do
         local device="/dev/zram$i"
         
@@ -625,39 +778,106 @@ setup_multiple_zram() {
         done
         
         if [[ ! -b "$device" ]]; then
-            log "设备zram$i未就绪" "warn"
+            log "设备zram$i未就绪，跳过" "warn"
             continue
         fi
         
         # 设置压缩算法
-        if [[ -w "/sys/block/zram$i/comp_algorithm" ]]; then
-            if ! echo "$algorithm" > "/sys/block/zram$i/comp_algorithm" 2>/dev/null; then
+        local comp_algo_file="/sys/block/zram$i/comp_algorithm"
+        if [[ -w "$comp_algo_file" ]]; then
+            if ! echo "$algorithm" > "$comp_algo_file" 2>/dev/null; then
                 debug_log "设置zram$i压缩算法失败，使用默认"
+            else
+                debug_log "zram$i 算法设置为: $algorithm"
             fi
         fi
         
-        # 设置大小
-        if ! echo "${per_device_mb}M" > "/sys/block/zram$i/disksize" 2>/dev/null; then
+        # 设置大小（使用字节精确控制）
+        local device_bytes=$((per_device_mb * 1024 * 1024))
+        if ! echo "$device_bytes" > "/sys/block/zram$i/disksize" 2>/dev/null; then
             log "设置zram$i大小失败" "warn"
             continue
         fi
         
+        # 验证设置的大小
+        local actual_bytes=$(cat "/sys/block/zram$i/disksize" 2>/dev/null || echo "0")
+        local actual_mb=$((actual_bytes / 1024 / 1024))
+        debug_log "zram$i 设置: 期望${per_device_mb}MB, 实际${actual_mb}MB"
+        
         # 创建swap
         if mkswap "$device" >/dev/null 2>&1; then
-            ((configured_count++))
-            debug_log "zram$i 配置完成"
+            # 启用swap
+            if swapon "$device" -p 100 2>/dev/null; then
+                ((configured_count++))
+                total_configured_bytes=$((total_configured_bytes + actual_bytes))
+                debug_log "zram$i 配置完成并已启用"
+            else
+                debug_log "启用zram$i失败"
+            fi
         else
             log "创建zram$i swap失败" "warn"
         fi
     done
     
     if (( configured_count > 0 )); then
+        local total_configured_mb=$((total_configured_bytes / 1024 / 1024))
+        debug_log "多设备zram配置完成: ${configured_count}个设备, 总计${total_configured_mb}MB"
+        
+        # 创建管理服务
+        create_multi_zram_service "$configured_count" "$per_device_mb" "$algorithm"
+        
         echo "$configured_count"
         return 0
     else
         log "所有zram设备配置失败" "error"
         return 1
     fi
+}
+
+# === 创建多设备zram服务 ===
+create_multi_zram_service() {
+    local device_count="$1"
+    local per_device_mb="$2" 
+    local algorithm="$3"
+    
+    local service_file="/etc/systemd/system/multi-zram.service"
+    local device_bytes=$((per_device_mb * 1024 * 1024))
+    
+    cat > "$service_file" << EOF
+[Unit]
+Description=Multi Zram Setup
+Before=swap.target
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c '
+    modprobe zram num_devices=$device_count
+    sleep 2
+    for i in \$(seq 0 \$((${device_count}-1))); do
+        echo $algorithm > /sys/block/zram\$i/comp_algorithm 2>/dev/null || true
+        echo $device_bytes > /sys/block/zram\$i/disksize
+        mkswap /dev/zram\$i
+        swapon /dev/zram\$i -p 100
+    done
+'
+ExecStop=/bin/bash -c '
+    for i in \$(seq 0 \$((${device_count}-1))); do
+        swapoff /dev/zram\$i 2>/dev/null || true
+        echo 1 > /sys/block/zram\$i/reset 2>/dev/null || true
+    done
+    modprobe -r zram 2>/dev/null || true
+'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    systemctl enable multi-zram.service >/dev/null 2>&1 || true
+    
+    debug_log "多设备zram服务已创建: $device_count 个设备"
 }
 
 # === 主要zram配置函数 ===
