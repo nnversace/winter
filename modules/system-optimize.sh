@@ -1,5 +1,5 @@
 #!/bin/bash
-# 系统优化脚本- 为Debian 13优化
+# 系统优化脚本 v6.1 - 为Debian 13优化
 # 功能: 智能Zram配置, 时区与时间同步, 内核参数调优
 
 # --- 安全设置 ---
@@ -11,7 +11,7 @@ set -euo pipefail
 # --- 全局常量 ---
 readonly ZRAM_CONFIG_FILE="/etc/default/zramswap"
 readonly SYSCTL_CONFIG_FILE="/etc/sysctl.d/99-zram-optimize.conf"
-readonly SCRIPT_VERSION="6.0"
+readonly SCRIPT_VERSION="6.1"
 # 当DEBUG=1时启用详细日志
 readonly DEBUG="${DEBUG:-0}"
 
@@ -20,7 +20,8 @@ readonly DEBUG="${DEBUG:-0}"
 # 统一的日志输出函数
 log() {
     local type="$1"
-    local msg="$2"
+    # FIX: Provide a default empty value for msg to avoid unbound variable error with `set -u`
+    local msg="${2:-}"
     local color_ok="\033[0;32m"
     local color_info="\033[0;36m"
     local color_warn="\033[0;33m"
@@ -35,6 +36,7 @@ log() {
         warn) prefix="[!] " color="$color_warn" ;;
         error) prefix="[✗] " color="$color_error" ;;
         debug) [[ "$DEBUG" -eq 1 ]] || return 0; prefix="[DEBUG] " color="$color_debug" ;;
+        # If no type is specified, the first argument is the message itself
         *) msg="$type"; prefix="    "; color="$color_reset" ;;
     esac
 
