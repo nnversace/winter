@@ -37,6 +37,7 @@ SYSTEM_OS=""
 trap 'echo -e "\n${RED}❌ Operation cancelled by user.${NC}"; cleanup; exit 130' INT TERM
 
 cleanup() {
+    # Clean up temporary files on exit
     [[ -n "${temp_dir:-}" ]] && rm -rf "$temp_dir" 2>/dev/null || true
 }
 
@@ -128,18 +129,18 @@ detect_system() {
 check_existing_installation() {
     if [[ -f "$INSTALL_DIR/mosdns" ]]; then
         log_warning "Existing mosdns installation detected."
-        echo -e "${YELLOW}Would you like to:${NC}"
-        echo "  1) Reinstall (recommended)"
+        echo -e "${YELLOW}Please choose an option:${NC}"
+        echo "  1) Reinstall (recommended for a clean setup)"
         echo "  2) Upgrade configuration only"
         echo "  3) Cancel installation"
         
         while true; do
-            read -p "Enter your choice (1-3): " choice
+            read -p "Enter your choice [1-3]: " choice
             case $choice in
                 1) log_info "Proceeding with full reinstallation..."; break ;;
                 2) upgrade_config_only; exit 0 ;;
                 3) log_info "Installation cancelled."; exit 0 ;;
-                *) echo "Please enter 1, 2, or 3." ;;
+                *) echo -e "${RED}Invalid choice. Please enter 1, 2, or 3.${NC}" ;;
             esac
         done
     fi
@@ -153,22 +154,22 @@ install_dependencies() {
         ubuntu|debian)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y curl wget unzip systemd ca-certificates
+            apt-get install -y --no-install-recommends curl unzip ca-certificates
             ;;
         centos|rhel|fedora|almalinux|rocky)
             if command -v dnf &>/dev/null; then
-                dnf install -y curl wget unzip systemd ca-certificates
+                dnf install -y curl unzip ca-certificates
             else
-                yum install -y curl wget unzip systemd ca-certificates
+                yum install -y curl unzip ca-certificates
             fi
             ;;
         arch|manjaro)
-            pacman -Sy --noconfirm --needed curl wget unzip systemd ca-certificates
+            pacman -Sy --noconfirm --needed curl unzip ca-certificates
             ;;
         *)
             log_warning "Unknown OS detected. Attempting generic installation..."
-            if ! (command -v curl && command -v wget && command -v unzip) &>/dev/null; then
-                log_error "Please manually install: curl, wget, unzip"
+            if ! (command -v curl && command -v unzip) &>/dev/null; then
+                log_error "Please manually install: curl, unzip"
                 exit 1
             fi
             ;;
@@ -191,7 +192,7 @@ fetch_latest_version() {
     fi
     
     if [[ -z "$LATEST_VERSION" ]]; then
-        log_error "Invalid version information received."
+        log_error "Could not determine the latest version."
         exit 1
     fi
     
@@ -202,23 +203,20 @@ download_and_install_binary() {
     log_info "Downloading mosdns-x binary..."
     
     local download_url="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/mosdns-linux-$SYSTEM_ARCH.zip"
-    local temp_dir=$(mktemp -d)
+    temp_dir=$(mktemp -d)
     
-    # Download with progress bar and retry logic
-    if ! wget --progress=bar:force:noscroll \
-              --timeout=30 \
-              --tries=3 \
-              --retry-connrefused \
-              "$download_url" -O "$temp_dir/mosdns.zip" 2>&1; then
-        log_error "Download failed. Please check your connection."
-        rm -rf "$temp_dir"
+    # Download with curl, with progress bar and retry logic
+    if ! curl -L --progress-bar --fail --retry 3 --retry-delay 2 \
+              "$download_url" -o "$temp_dir/mosdns.zip"; then
+        log_error "Download failed. Please check your connection and the release URL."
+        cleanup
         exit 1
     fi
     
     # Verify download
     if [[ ! -s "$temp_dir/mosdns.zip" ]]; then
         log_error "Downloaded file is empty or corrupted."
-        rm -rf "$temp_dir"
+        cleanup
         exit 1
     fi
     
@@ -226,7 +224,7 @@ download_and_install_binary() {
     
     if ! unzip -qq "$temp_dir/mosdns.zip" -d "$temp_dir"; then
         log_error "Failed to extract downloaded file."
-        rm -rf "$temp_dir"
+        cleanup
         exit 1
     fi
     
@@ -239,11 +237,11 @@ download_and_install_binary() {
     # Verify installation
     if ! "$INSTALL_DIR/mosdns" version &>/dev/null; then
         log_error "Binary installation failed or corrupted."
-        rm -rf "$temp_dir"
+        cleanup
         exit 1
     fi
     
-    rm -rf "$temp_dir"
+    cleanup
     log_success "Binary installed successfully."
 }
 
@@ -253,7 +251,7 @@ create_optimized_config() {
     mkdir -p "$CONFIG_DIR"
     
     cat > "$CONFIG_DIR/config.yaml" << 'EOF'
-# High-performance minimal configuration for mosdns-x
+# High-performance minimal configuration for mosdns-x v5+
 # For more details, visit: https://github.com/pmkol/mosdns-x/wiki
 
 log:
@@ -270,6 +268,7 @@ plugins:
       size: 16384
       min_ttl: 60
       max_ttl: 3600
+      dump_file: "cache.dump"
 
   # ECS support for better CDN performance
   - tag: ecs
@@ -278,41 +277,30 @@ plugins:
       auto: true
       ipv4_mask: 24
 
-  # Fast forward with optimized upstream servers
-  - tag: forward
-    type: fast_forward
+  # Forward queries to reliable upstream servers
+  - tag: forward_remote
+    type: forward
     args:
+      # List of upstream DNS servers
       upstream:
         # Primary: DNS-over-QUIC (fastest)
         - addr: "quic://dns.google"
-          enable_pipeline: true
-          timeout: 2s
         - addr: "quic://1.1.1.1"
-          enable_pipeline: true
-          timeout: 2s
 
         # Secondary: DNS-over-HTTPS (secure)
         - addr: "https://dns.google/dns-query"
-          timeout: 3s
         - addr: "https://1.1.1.1/dns-query"
-          timeout: 3s
 
         # Tertiary: DNS-over-TLS (secure)
         - addr: "tls://dns.google"
-          enable_pipeline: true
-          timeout: 3s
         - addr: "tls://1.1.1.1"
-          enable_pipeline: true
-          timeout: 3s
         
         # Fallback: Standard DNS
         - addr: "8.8.8.8:53"
-          timeout: 2s
         - addr: "1.1.1.1:53"
-          timeout: 2s
 
-      concurrent: 2
-      fastest_v4: true
+      # Number of concurrent queries to send
+      concurrency: 2
 
   # Main execution sequence
   - tag: main_sequence
@@ -321,17 +309,18 @@ plugins:
       exec:
         - ecs
         - cache
-        - forward
+        - forward_remote
 
 servers:
   - exec: main_sequence
+    # Set idle timeout for TCP connections
+    idle_timeout: 10s
     listeners:
       - protocol: udp
         addr: "0.0.0.0:53"
-        bufsize: 4096
+        # 'bufsize' key is deprecated in recent versions
       - protocol: tcp
         addr: "0.0.0.0:53"
-        timeout: 10s
 EOF
 
     # Set proper permissions
@@ -368,7 +357,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$CONFIG_DIR /var/log
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -383,6 +372,7 @@ configure_logging() {
     
     # Create log file with proper permissions
     touch "$LOG_FILE"
+    chown root:root "$LOG_FILE"
     chmod 644 "$LOG_FILE"
     
     # Setup log rotation
@@ -404,22 +394,30 @@ EOF
 }
 
 start_and_enable_service() {
-    log_info "Starting and enabling service..."
+    log_info "Enabling and starting service..."
     
     systemctl enable "$SERVICE_NAME" &>/dev/null
-    systemctl start "$SERVICE_NAME"
+    systemctl restart "$SERVICE_NAME"
     
-    # Wait and verify service is running
-    sleep 3
+    # Wait and verify service is running with a retry loop
+    log_info "Waiting for service to become active..."
+    local retries=5
+    local interval=2
+    for i in $(seq 1 $retries); do
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log_success "Service started successfully."
+            return 0
+        fi
+        sleep $interval
+    done
     
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        log_success "Service is running successfully."
-    else
-        log_error "Service failed to start."
-        log_info "Checking logs..."
-        journalctl -u "$SERVICE_NAME" --no-pager -n 10
-        exit 1
-    fi
+    log_error "Service failed to start."
+    log_info "Dumping last 15 lines from systemd journal:"
+    journalctl -u "$SERVICE_NAME" --no-pager -n 15
+    echo
+    log_info "Dumping last 15 lines from mosdns log file:"
+    tail -n 15 "$LOG_FILE"
+    exit 1
 }
 
 configure_firewall() {
@@ -432,7 +430,7 @@ configure_firewall() {
         ufw allow 53/tcp comment "Mosdns DNS" &>/dev/null
         ufw allow 53/udp comment "Mosdns DNS" &>/dev/null
         firewall_configured=true
-        log_success "UFW rules added."
+        log_success "UFW rules for port 53 (TCP/UDP) added."
     fi
     
     # FirewallD (CentOS/RHEL/Fedora)
@@ -440,7 +438,7 @@ configure_firewall() {
         firewall-cmd --permanent --add-service=dns &>/dev/null
         firewall-cmd --reload &>/dev/null
         firewall_configured=true
-        log_success "FirewallD rules added."
+        log_success "FirewallD rules for DNS service added."
     fi
     
     if ! $firewall_configured; then
@@ -451,15 +449,15 @@ configure_firewall() {
 run_dns_test() {
     log_info "Running DNS functionality test..."
     
-    # Wait for service to fully start
+    # Wait for service to fully initialize
     sleep 2
     
     # Test DNS resolution
     if timeout 5 nslookup google.com 127.0.0.1 &>/dev/null; then
-        log_success "DNS test passed - service is working correctly."
+        log_success "DNS test passed - service is resolving queries correctly."
     else
-        log_warning "DNS test failed - service may need additional configuration."
-        log_info "Check logs with: journalctl -u $SERVICE_NAME -f"
+        log_warning "DNS test failed. The service might be running but unable to resolve external domains."
+        log_info "Check logs for upstream errors with: journalctl -u $SERVICE_NAME -f"
     fi
 }
 
@@ -467,11 +465,13 @@ upgrade_config_only() {
     log_info "Upgrading configuration only..."
     
     if [[ -f "$CONFIG_DIR/config.yaml" ]]; then
-        cp "$CONFIG_DIR/config.yaml" "$CONFIG_DIR/config.yaml.backup.$(date +%s)"
-        log_info "Existing config backed up."
+        local backup_file="$CONFIG_DIR/config.yaml.backup.$(date +%s)"
+        cp "$CONFIG_DIR/config.yaml" "$backup_file"
+        log_info "Existing config backed up to $backup_file"
     fi
     
     create_optimized_config
+    log_info "Restarting service with new configuration..."
     systemctl restart "$SERVICE_NAME" 2>/dev/null || true
     
     log_success "Configuration upgraded successfully."
@@ -504,11 +504,9 @@ show_completion_summary() {
     echo -e "  ${YELLOW}Dig Test:${NC}   dig @127.0.0.1 google.com"
     echo
     echo -e "${CYAN}🔧 Configuration Features:${NC}"
-    echo -e "  ${YELLOW}•${NC} DNS-over-QUIC (fastest)"
-    echo -e "  ${YELLOW}•${NC} DNS-over-HTTPS (secure)"
-    echo -e "  ${YELLOW}•${NC} DNS-over-TLS (secure)"
+    echo -e "  ${YELLOW}•${NC} DNS-over-QUIC, DoH, DoT"
     echo -e "  ${YELLOW}•${NC} ECS optimization for CDN"
-    echo -e "  ${YELLOW}•${NC} 16K cache with TTL control"
+    echo -e "  ${YELLOW}•${NC} 16K entry cache with TTL control"
     echo -e "  ${YELLOW}•${NC} Concurrent upstream queries"
     echo
     echo -e "${YELLOW}💡 To use this DNS server, set your system/router DNS to this server's IP address.${NC}"
@@ -520,7 +518,7 @@ uninstall_mosdns() {
     log_info "Starting mosdns-x uninstallation..."
     
     if [[ ! -f "$INSTALL_DIR/mosdns" && ! -f "/etc/systemd/system/$SERVICE_NAME.service" ]]; then
-        log_error "Mosdns-x doesn't appear to be installed."
+        log_error "Mosdns-x does not appear to be installed."
         exit 1
     fi
     
@@ -535,8 +533,7 @@ uninstall_mosdns() {
     
     systemctl daemon-reload
     
-    echo -e "${YELLOW}Remove configuration directory ($CONFIG_DIR) and logs? [y/N]:${NC} "
-    read -r response
+    read -p "Remove configuration directory ($CONFIG_DIR) and logs? [y/N]: " response
     if [[ "$response" =~ ^[Yy]$ ]]; then
         rm -rf "$CONFIG_DIR"
         rm -f "$LOG_FILE"
@@ -556,8 +553,8 @@ Usage: $0 [command]
 Commands:
   install      Install or reinstall mosdns-x (default)
   uninstall    Remove mosdns-x from the system
-  upgrade      Upgrade configuration to latest optimized version
-  test         Test DNS functionality
+  upgrade      Upgrade configuration to the latest optimized version
+  test         Run a series of DNS functionality tests
   status       Show service status and information
   help         Display this help message
 
@@ -568,13 +565,6 @@ Examples:
   sudo $0 uninstall          # Remove mosdns-x
   $0 status                  # Show current status (no sudo needed)
   $0 test                    # Test DNS functionality
-
-Features:
-  • High-performance DNS forwarding with DoQ/DoH/DoT
-  • ECS optimization for better CDN performance
-  • Enterprise-grade security and reliability
-  • Automatic service management and monitoring
-  • Comprehensive logging and error handling
 
 EOF
 }
@@ -616,7 +606,7 @@ test_dns_functionality() {
         exit 1
     fi
     
-    echo "Testing various DNS queries..."
+    echo "Testing various DNS queries via 127.0.0.1..."
     
     local test_domains=("google.com" "cloudflare.com" "github.com")
     local success_count=0
@@ -635,7 +625,7 @@ test_dns_functionality() {
     if [[ $success_count -eq ${#test_domains[@]} ]]; then
         log_success "All DNS tests passed successfully!"
     else
-        log_warning "$success_count/${#test_domains[@]} tests passed. Check service logs."
+        log_warning "$success_count/${#test_domains[@]} tests passed. Check service logs for upstream issues."
     fi
 }
 
@@ -683,5 +673,5 @@ main() {
     esac
 }
 
-# Execute main function with all arguments
+# Execute main function with all provided arguments
 main "$@"
