@@ -1,5 +1,5 @@
 #!/bin/bash
-# 系统优化脚本 v6.1 - 为Debian 13优化
+# 系统优化脚本 - 为Debian 13优化
 # 功能: 智能Zram配置, 时区与时间同步, 内核参数调优
 
 # --- 安全设置 ---
@@ -11,7 +11,7 @@ set -euo pipefail
 # --- 全局常量 ---
 readonly ZRAM_CONFIG_FILE="/etc/default/zramswap"
 readonly SYSCTL_CONFIG_FILE="/etc/sysctl.d/99-zram-optimize.conf"
-readonly SCRIPT_VERSION="6.1"
+readonly SCRIPT_VERSION="6.2"
 # 当DEBUG=1时启用详细日志
 readonly DEBUG="${DEBUG:-0}"
 
@@ -190,14 +190,18 @@ set_kernel_parameters() {
     log "info" "配置内核参数: swappiness=$swappiness, page-cluster=0 (优化ZRAM)"
 
     # 创建sysctl配置文件
-    # zswap.enabled=0: 避免与ZRAM双重压缩，确保ZRAM高效工作。
     # page-cluster=0: 减少写入ZRAM的数据块大小，提高压缩效率。
     cat > "$SYSCTL_CONFIG_FILE" << EOF
 # 由系统优化脚本 v${SCRIPT_VERSION} 自动生成
 vm.swappiness = $swappiness
 vm.page-cluster = 0
-zswap.enabled = 0
 EOF
+
+    # 智能禁用zswap：仅在zswap模块存在时才禁用，避免在不支持的内核上报错。
+    if [[ -d "/sys/module/zswap" ]]; then
+        log "debug" "检测到ZSwap模块，将其禁用以优化ZRAM。"
+        echo "zswap.enabled = 0" >> "$SYSCTL_CONFIG_FILE"
+    fi
 
     # 应用配置
     sysctl -p "$SYSCTL_CONFIG_FILE" &>/dev/null || log "warn" "应用sysctl配置时出现非致命错误。"
