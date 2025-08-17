@@ -1,138 +1,262 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-# ===========================================
-# mosdns-x 一键安装/卸载/重装脚本（systemd）
-# ===========================================
-# 用法示例：
-#   安装（自动取最新）：
-#     sudo bash mosdns-x-install.sh
-#   指定版本与端口：
-#     sudo bash mosdns-x-install.sh --version v25.08.15 --port 53
-#   卸载（保留配置）：
-#     sudo bash mosdns-x-install.sh --uninstall
-#   卸载并清理配置（purge）：
-#     sudo bash mosdns-x-install.sh --uninstall --purge
-#   重装（保留配置；等价于 先卸载再安装）：
-#     sudo bash mosdns-x-install.sh --reinstall
-#   重装并清理配置后重建：
-#     sudo bash mosdns-x-install.sh --reinstall --purge
+# Enhanced management script for mosdns-x
+# Supports: Install, Uninstall, Reinstall
+#
+# Author: Gemini
+# Inspired by the community and official documentation.
 
-# -------------------------------
-# 默认参数（可被覆盖）
-# -------------------------------
-MODE="install"                  # install | uninstall | reinstall
-PURGE="0"                       # 1=清理配置
-VERSION=""                      # 空=自动获取最新
-PREFIX="/usr/local"
-WORKDIR="/etc/mosdns"
-PORT="53"
-WITH_EASY="0"
-START_AFTER="1"
+# --- Configuration ---
+# Colors for better output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# -------------------------------
-# 参数解析
-# -------------------------------
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --version) VERSION="${2:-}"; shift 2 ;;
-    --prefix) PREFIX="${2:-}"; shift 2 ;;
-    --workdir) WORKDIR="${2:-}"; shift 2 ;;
-    --port) PORT="${2:-}"; shift 2 ;;
-    --with-easymosdns) WITH_EASY="1"; shift 1 ;;
-    --no-start) START_AFTER="0"; shift 1 ;;
-    --uninstall) MODE="uninstall"; shift 1 ;;
-    --reinstall) MODE="reinstall"; shift 1 ;;
-    --purge) PURGE="1"; shift 1 ;;
-    -h|--help)
-      cat <<EOF
-用法：sudo bash $0 [选项]
-  安装（默认）：
-    --version <tag>       指定版本（默认自动获取最新）
-    --prefix <dir>        安装前缀（默认 /usr/local）
-    --workdir <dir>       工作目录（默认 /etc/mosdns）
-    --port <53>           监听端口（默认 53）
-    --with-easymosdns     使用 EasyMosdns 预置配置
-    --no-start            安装后不立即启动
+# File and directory paths
+INSTALL_DIR="/etc/mosdns"
+BIN_FILE="/usr/local/bin/mosdns-x"
+SERVICE_FILE="/etc/systemd/system/mosdns-x.service"
+CONFIG_FILE="$INSTALL_DIR/config.yaml"
+LATEST_API_URL="https://api.github.com/repos/pmkol/mosdns-x/releases/latest"
+# --- End Configuration ---
 
-  卸载：
-    --uninstall           卸载（默认保留配置）
-    --purge               搭配 --uninstall 或 --reinstall 时，连配置一起清理
 
-  重装（先卸载再安装）：
-    --reinstall           先卸载再安装（默认保留配置）
-    --purge               重装前清理旧配置后重建
+# --- Core Functions ---
+
+# Function to check for root privileges
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}This script must be run as root. Please use sudo.${NC}"
+        exit 1
+    fi
+}
+
+# Function to check for required commands (curl, unzip)
+check_dependencies() {
+    command -v curl >/dev/null 2>&1 || { echo -e >&2 "${RED}Error: curl is not installed. Please install it first.${NC}"; exit 1; }
+    command -v unzip >/dev/null 2>&1 || { echo -e >&2 "${RED}Error: unzip is not installed. Please install it first.${NC}"; exit 1; }
+}
+
+# Function to detect the system architecture
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64) echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        armv7*) echo "armv7" ;;
+        *)
+            echo -e "${RED}Unsupported architecture: $(uname -m)${NC}"
+            exit 1
+            ;;
+    esac
+}
+
+
+# --- Main Operations ---
+
+# Function to install mosdns-x
+install_mosdns() {
+    echo -e "${GREEN}Starting the installation of mosdns-x...${NC}"
+    check_dependencies
+
+    # Download the latest release
+    ARCH=$(detect_arch)
+    echo -e "${GREEN}Detected architecture: $ARCH${NC}"
+
+    echo -e "${YELLOW}Fetching the latest release information...${NC}"
+    LATEST_INFO=$(curl -s $LATEST_API_URL)
+    DOWNLOAD_URL=$(echo "$LATEST_INFO" | grep "browser_download_url" | grep "linux-$ARCH" | cut -d '"' -f 4)
+
+    if [ -z "$DOWNLOAD_URL" ]; then
+        echo -e "${RED}Could not find a download URL for your architecture.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Downloading the latest mosdns-x...${NC}"
+    curl -L -o "/tmp/mosdns-x.zip" "$DOWNLOAD_URL"
+    if [ $? -ne 0 ]; then echo -e "${RED}Download failed.${NC}"; exit 1; fi
+
+    echo -e "${GREEN}Unzipping the downloaded file...${NC}"
+    unzip -o "/tmp/mosdns-x.zip" -d "/tmp/mosdns-x"
+    if [ $? -ne 0 ]; then echo -e "${RED}Unzip failed.${NC}"; exit 1; fi
+
+    mv "/tmp/mosdns-x/mosdns-x" "$BIN_FILE"
+    chmod +x "$BIN_FILE"
+    rm -rf "/tmp/mosdns-x.zip" "/tmp/mosdns-x"
+    echo -e "${GREEN}Binary installed at $BIN_FILE${NC}"
+
+    # Create the configuration file
+    mkdir -p "$INSTALL_DIR"
+    if [ -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}Configuration file already exists. Skipping creation.${NC}"
+    else
+        echo -e "${GREEN}Creating a default configuration file...${NC}"
+        cat > "$CONFIG_FILE" << EOF
+# mosdns-x configuration file
+# For more details, see: https://github.com/pmkol/mosdns-x
+
+log:
+  level: info
+  file: "$INSTALL_DIR/mosdns.log"
+
+api:
+  http: "127.0.0.1:8080"
+
+plugins:
+  - tag: main_sequence
+    type: sequence
+    args:
+      - exec: forward_remote
+      - exec: fallback_local
+
+  - tag: forward_remote
+    type: forward
+    args:
+      upstreams:
+        - addr: https://dns.google/dns-query
+        - addr: https://1.1.1.1/dns-query
+
+  - tag: fallback_local
+    type: forward
+    args:
+      upstreams:
+        - addr: 223.5.5.5
+        - addr: 119.29.29.29
+
+servers:
+  - protocol: udp
+    addr: ":53"
+    plugin: main_sequence
+  - protocol: tcp
+    addr: ":53"
+    plugin: main_sequence
 EOF
-      exit 0
-      ;;
-    *) echo "未知参数：$1" ; exit 1 ;;
-  esac
-done
+    fi
 
-# -------------------------------
-# Root 检查
-# -------------------------------
-if [[ $EUID -ne 0 ]]; then
-  echo "本脚本需要 root 权限，请使用 sudo 运行。"
-  exit 1
-fi
+    # Create the systemd service
+    if [ -f "$SERVICE_FILE" ]; then
+        echo -e "${YELLOW}systemd service file already exists. Skipping creation.${NC}"
+    else
+        echo -e "${GREEN}Creating systemd service file...${NC}"
+        cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=mosdns-x: A high-performance DNS forwarding engine.
+After=network.target
 
-# -------------------------------
-# OS/Arch 检测
-# -------------------------------
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
-if [[ "$OS" != "linux" ]]; then
-  echo "当前系统：$OS。本脚本仅支持 Linux（systemd）。"
-  exit 1
-fi
+[Service]
+Type=simple
+ExecStart=$BIN_FILE -d $INSTALL_DIR -c $CONFIG_FILE
+Restart=on-failure
+RestartSec=5s
 
-case "$ARCH" in
-  x86_64|amd64)   ASSET_ARCH="linux-amd64" ;;
-  aarch64|arm64)  ASSET_ARCH="linux-arm64" ;;
-  armv7l|armv7)   ASSET_ARCH="linux-arm-7" ;;
-  armv6l|armv6)   ASSET_ARCH="linux-arm-6" ;;
-  armv5l|armv5)   ASSET_ARCH="linux-arm-5" ;;
-  mips64le)       ASSET_ARCH="linux-mips64le-hardfloat" ;;
-  *)
-    echo "未识别的架构: $ARCH"
-    exit 1
-    ;;
-esac
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable mosdns-x
+        echo -e "${GREEN}Service created and enabled.${NC}"
+    fi
 
-REPO="pmkol/mosdns-x"
-BIN_DIR="${PREFIX}/bin"
-SERVICE_NAME="mosdns"   # 由 'mosdns service install' 创建
-
-# -------------------------------
-# 通用函数
-# -------------------------------
-log(){ printf "\033[1;32m[+] %s\033[0m\n" "$*"; }
-warn(){ printf "\033[1;33m[!] %s\033[0m\n" "$*"; }
-err(){ printf "\033[1;31m[×] %s\033[0m\n" "$*"; }
-
-mosdns_bin_path() {
-  if command -v mosdns >/dev/null 2>&1; then
-    command -v mosdns
-  elif [[ -x "${BIN_DIR}/mosdns" ]]; then
-    echo "${BIN_DIR}/mosdns"
-  else
-    echo ""
-  fi
+    echo -e "${GREEN}----------------------------------------${NC}"
+    echo -e "${GREEN}mosdns-x has been successfully installed!${NC}"
+    echo -e "${YELLOW}To start mosdns-x, run:         ${NC}${GREEN}systemctl start mosdns-x${NC}"
+    echo -e "${YELLOW}To check the status, run:        ${NC}${GREEN}systemctl status mosdns-x${NC}"
+    echo -e "${YELLOW}The configuration file is at:  ${NC}${GREEN}$CONFIG_FILE${NC}"
+    echo -e "${GREEN}----------------------------------------${NC}"
 }
 
-stop_and_disable_service() {
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
-    systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
-  fi
+# Function to uninstall mosdns-x
+uninstall_mosdns() {
+    echo -e "${YELLOW}Uninstalling mosdns-x...${NC}"
+
+    # Stop and disable the service
+    if systemctl is-active --quiet mosdns-x; then
+        systemctl stop mosdns-x
+        echo "Stopped mosdns-x service."
+    fi
+    if systemctl is-enabled --quiet mosdns-x; then
+        systemctl disable mosdns-x
+        echo "Disabled mosdns-x service."
+    fi
+
+    read -p "Are you sure you want to remove all mosdns-x files, including configuration? [y/N] " -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}Uninstallation cancelled.${NC}"
+        exit 0
+    fi
+
+    # Remove files
+    rm -f "$BIN_FILE"
+    rm -f "$SERVICE_FILE"
+    rm -rf "$INSTALL_DIR"
+    echo "Removed files: $BIN_FILE, $SERVICE_FILE, and directory $INSTALL_DIR"
+
+    # Reload systemd
+    systemctl daemon-reload
+    echo "Reloaded systemd daemon."
+
+    echo -e "${GREEN}mosdns-x has been successfully uninstalled.${NC}"
 }
 
-daemon_reload() {
-  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
+# Function to reinstall mosdns-x
+reinstall_mosdns() {
+    echo -e "${YELLOW}Reinstalling mosdns-x...${NC}"
+    uninstall_mosdns
+    echo -e "${YELLOW}----------------------------------------${NC}"
+    echo -e "${YELLOW}Proceeding with new installation...${NC}"
+    install_mosdns
 }
 
-open_port() {
-  local p="$1"
-  if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --add-port="${p}/udp" --permanent || true
+
+# --- Script Entry Point ---
+
+# Main function to show menu and handle logic
+main() {
+    check_root
+
+    # Handle command-line arguments
+    if [[ $# -gt 0 ]]; then
+        case $1 in
+            install)
+                install_mosdns
+                ;;
+            uninstall)
+                uninstall_mosdns
+                ;;
+            reinstall)
+                reinstall_mosdns
+                ;;
+            *)
+                echo -e "${RED}Invalid argument: $1${NC}"
+                echo "Usage: $0 [install|uninstall|reinstall]"
+                exit 1
+                ;;
+        esac
+    else
+        # Interactive Menu
+        echo "----------------------------------------"
+        echo "        mosdns-x Management"
+        echo "----------------------------------------"
+        echo "1. Install mosdns-x"
+        echo "2. Uninstall mosdns-x"
+        echo "3. Reinstall mosdns-x"
+        echo "4. Exit"
+        echo "----------------------------------------"
+        read -p "Please choose an option [1-4]: " choice
+
+        case $choice in
+            1) install_mosdns ;;
+            2) uninstall_mosdns ;;
+            3) reinstall_mosdns ;;
+            4) exit 0 ;;
+            *)
+                echo -e "${RED}Invalid option.${NC}"
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+# Run the script
+main "$@"
