@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #====================================================================================================
-# mosdns-x 一键管理脚本 for Debian 13
+# mosdns-x 一键管理脚本 for Debian (已修正下载逻辑)
 #
 # 功能:
 #   - 安装: 下载、配置并启动 mosdns-x 服务
@@ -9,6 +9,9 @@
 #   - 重装: 先执行卸载，再执行安装
 #
 # GitHub: https://github.com/pmkol/mosdns-x
+#
+# 变更日志:
+#   - 修正了下载逻辑，不再硬编码文件名格式，而是通过 GitHub API 动态获取下载链接，避免 404 错误。
 #====================================================================================================
 
 # --- 配置 ---
@@ -140,14 +143,20 @@ do_install() {
     fi
 
     # 3. 下载最新版本
-    log_info "正在获取最新版本号..."
-    LATEST_TAG=$(wget -qO- "https://api.github.com/repos/pmkol/mosdns-x/releases/latest" | grep -oP '"tag_name": "\K(.*)(?=")')
+    log_info "正在从 GitHub API 获取最新版本信息..."
+    API_RESPONSE=$(wget -qO- "https://api.github.com/repos/pmkol/mosdns-x/releases/latest")
+    
+    LATEST_TAG=$(echo "${API_RESPONSE}" | grep -oP '"tag_name": "\K(.*)(?=")')
     if [ -z "${LATEST_TAG}" ]; then
         log_error "获取最新版本号失败，请检查网络或 GitHub API 限制。"
     fi
     log_info "最新版本为: ${LATEST_TAG}"
 
-    DOWNLOAD_URL="https://github.com/pmkol/mosdns-x/releases/download/${LATEST_TAG}/mosdns-x-linux-${ARCH}.zip"
+    # 修正: 直接从 API 响应中解析正确的下载链接，而不是猜测文件名
+    DOWNLOAD_URL=$(echo "${API_RESPONSE}" | grep -oP "\"browser_download_url\": \"\K(.*)linux-${ARCH}\.zip(?=\")")
+    if [ -z "${DOWNLOAD_URL}" ]; then
+        log_error "未能在 API 响应中找到适用于 ${ARCH} 架构的下载链接。"
+    fi
     
     log_info "准备下载: ${DOWNLOAD_URL}"
     rm -rf "${TMP_DIR}"
