@@ -1,85 +1,115 @@
 #!/bin/bash
 
-#====================================================================================================
-# mosdns-x 一键管理脚本 for Debian (已修正下载逻辑)
+#================================================================================
+# mosdns-x 一键安装脚本 for Debian 13 (已修复)
+#
+# 更新日志:
+#   - 修复了 systemd 服务启动命令。新版本需要使用 'start' 子命令。
+#   - 修复了因上游发布包内二进制文件名变更导致的安装失败问题。
+#     脚本现在会自动查找名为 'mosdns' 的文件并将其安装为 'mosdns-x'。
 #
 # 功能:
-#   - 安装: 下载、配置并启动 mosdns-x 服务
-#   - 卸载: 停止并移除 mosdns-x 相关文件
-#   - 重装: 先执行卸载，再执行安装
+#   - 自动检测并下载最新的 mosdns-x 版本
+#   - 安装必要的依赖 (unzip)
+#   - 创建配置文件目录和文件
+#   - 使用您提供的配置写入 config.yaml
+#   - 创建并启动 systemd 服务，实现开机自启
+#   - 清理临时文件
 #
-# GitHub: https://github.com/pmkol/mosdns-x
-#
-# 变更日志:
-#   - 修正了下载逻辑，不再硬编码文件名格式，而是通过 GitHub API 动态获取下载链接，避免 404 错误。
-#====================================================================================================
+# 使用方法:
+#   1. 将此脚本保存为 .sh 文件, 例如: install_mosdns.sh
+#   2. 给予执行权限: chmod +x install_mosdns.sh
+#   3. 使用 root 权限运行: sudo ./install_mosdns.sh
+#================================================================================
 
-# --- 配置 ---
+# --- 全局变量 ---
 # 二进制文件安装路径
 INSTALL_PATH="/usr/local/bin"
-# 配置文件目录
+# 配置文件路径
 CONFIG_PATH="/etc/mosdns-x"
 # systemd 服务文件路径
 SERVICE_PATH="/etc/systemd/system/mosdns-x.service"
 # 临时下载目录
-TMP_DIR="/tmp/mosdns_x_install"
+TMP_DIR=$(mktemp -d)
 
-# --- 颜色定义 ---
-GREEN="\033[32m"
-RED="\033[31m"
-YELLOW="\033[33m"
-NC="\033[0m" # No Color
-
-# --- 辅助函数 ---
-
-# 检查是否为 root 用户
-check_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        echo -e "${RED}错误: 此脚本需要 root 权限运行。请使用 'sudo' 或以 root 用户身份执行。${NC}"
-        exit 1
-    fi
-}
+# --- 函数定义 ---
 
 # 打印信息
-log_info() {
-    echo -e "${GREEN}[信息] $1${NC}"
-}
-
-# 打印警告
-log_warn() {
-    echo -e "${YELLOW}[警告] $1${NC}"
+echo_info() {
+    echo -e "\033[32m[INFO]\033[0m $1"
 }
 
 # 打印错误并退出
-log_error() {
-    echo -e "${RED}[错误] $1${NC}"
+echo_error() {
+    echo -e "\033[31m[ERROR]\033[0m $1"
+    # 清理临时目录
+    if [ -d "$TMP_DIR" ]; then
+        rm -rf "$TMP_DIR"
+    fi
     exit 1
 }
 
-# 检测系统架构
-detect_arch() {
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64)
-            ARCH="amd64"
-            ;;
-        aarch64)
-            ARCH="arm64"
-            ;;
-        *)
-            log_error "不支持的系统架构: ${ARCH}。仅支持 x86_64 和 aarch64。"
-            ;;
-    esac
-    log_info "检测到系统架构: ${ARCH}"
+# 检查root权限
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo_error "请使用 root 权限运行此脚本 (例如: sudo ./script.sh)"
+    fi
+}
+
+# 安装依赖
+install_dependencies() {
+    echo_info "正在更新软件包列表并安装依赖 (unzip, curl)..."
+    if ! apt-get update || ! apt-get install -y unzip curl; then
+        echo_error "依赖安装失败，请检查您的网络连接和软件源设置。"
+    fi
+}
+
+# 获取最新版本号和下载链接
+get_latest_release() {
+    echo_info "正在获取 mosdns-x 最新版本信息..."
+    LATEST_RELEASE_URL="https://api.github.com/repos/pmkol/mosdns-x/releases/latest"
+    
+    # 使用 curl 获取 API 信息，并通过 grep 和 sed 筛选下载链接
+    DOWNLOAD_URL=$(curl -s $LATEST_RELEASE_URL | grep "browser_download_url.*linux-amd64.zip" | sed -E 's/.*"([^"]+)".*/\1/')
+    
+    if [ -z "$DOWNLOAD_URL" ]; then
+        echo_error "无法获取最新的 mosdns-x 下载链接。请检查网络或访问 https://github.com/pmkol/mosdns-x/releases 页面。"
+    fi
+    echo_info "成功获取下载链接: $DOWNLOAD_URL"
+}
+
+# 下载并安装
+download_and_install() {
+    echo_info "正在下载 mosdns-x..."
+    if ! wget -q -O "$TMP_DIR/mosdns.zip" "$DOWNLOAD_URL"; then
+        echo_error "下载失败，请检查网络。"
+    fi
+    
+    echo_info "正在解压文件..."
+    if ! unzip -q -o "$TMP_DIR/mosdns.zip" -d "$TMP_DIR"; then
+        echo_error "解压失败。"
+    fi
+    
+    # 查找解压后的可执行文件，它现在通常叫 'mosdns'
+    SOURCE_EXEC_NAME="mosdns"
+    if [ ! -f "$TMP_DIR/$SOURCE_EXEC_NAME" ]; then
+        echo_error "在解压的文件中找不到名为 '$SOURCE_EXEC_NAME' 的可执行文件。"
+    fi
+
+    echo_info "正在安装 $SOURCE_EXEC_NAME 到 $INSTALL_PATH/mosdns-x..."
+    # 安装时将其重命名为 mosdns-x 以保持脚本统一性
+    if ! install -m 755 "$TMP_DIR/$SOURCE_EXEC_NAME" "$INSTALL_PATH/mosdns-x"; then
+        echo_error "安装二进制文件失败。"
+    fi
 }
 
 # 创建配置文件
 create_config_file() {
-    log_info "创建配置文件目录: ${CONFIG_PATH}"
-    mkdir -p "${CONFIG_PATH}"
-
-    log_info "写入默认配置文件到 ${CONFIG_PATH}/config.yaml"
-    cat > "${CONFIG_PATH}/config.yaml" <<EOF
+    echo_info "正在创建配置文件到 $CONFIG_PATH/config.yaml..."
+    mkdir -p "$CONFIG_PATH"
+    
+    # 使用 cat 和 EOF 创建配置文件
+    cat > "$CONFIG_PATH/config.yaml" << EOF
 log:
   level: info
   file: ""
@@ -101,169 +131,86 @@ servers:
       - protocol: tcp
         addr: 127.0.0.1:5533
 EOF
+
+    if [ $? -ne 0 ]; then
+        echo_error "创建配置文件失败。"
+    fi
 }
 
-# 创建 systemd 服务文件
+# 创建 systemd 服务
 create_systemd_service() {
-    log_info "创建 systemd 服务文件: ${SERVICE_PATH}"
-    cat > "${SERVICE_PATH}" <<EOF
+    echo_info "正在创建 systemd 服务..."
+    
+    cat > "$SERVICE_PATH" << EOF
 [Unit]
 Description=mosdns-x - A DNS forwarder
-Documentation=https://github.com/pmkol/mosdns-x
+Documentation=https://github.com/pmkol/mosdns-x/wiki
 After=network.target
 
 [Service]
 Type=simple
-User=root
-ExecStart=${INSTALL_PATH}/mosdns-x -c ${CONFIG_PATH}/config.yaml
+# **[修复]** 新版本需要 'start' 子命令来运行
+ExecStart=$INSTALL_PATH/mosdns-x start -c $CONFIG_PATH/config.yaml
 Restart=on-failure
-RestartSec=5s
+RestartSec=5
 LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+    if [ $? -ne 0 ]; then
+        echo_error "创建 systemd 服务文件失败。"
+    fi
 }
 
-# --- 主要功能函数 ---
-
-# 安装 mosdns-x
-do_install() {
-    log_info "开始安装 mosdns-x..."
-    
-    # 1. 检查环境
-    detect_arch
-    
-    # 2. 安装依赖
-    log_info "更新软件包列表并安装依赖 (wget, unzip, ca-certificates)..."
-    apt-get update > /dev/null
-    apt-get install -y wget unzip ca-certificates > /dev/null
-    if [ $? -ne 0 ]; then
-        log_error "依赖安装失败，请检查网络连接和 apt 源。"
-    fi
-
-    # 3. 下载最新版本
-    log_info "正在从 GitHub API 获取最新版本信息..."
-    API_RESPONSE=$(wget -qO- "https://api.github.com/repos/pmkol/mosdns-x/releases/latest")
-    
-    LATEST_TAG=$(echo "${API_RESPONSE}" | grep -oP '"tag_name": "\K(.*)(?=")')
-    if [ -z "${LATEST_TAG}" ]; then
-        log_error "获取最新版本号失败，请检查网络或 GitHub API 限制。"
-    fi
-    log_info "最新版本为: ${LATEST_TAG}"
-
-    # 修正: 直接从 API 响应中解析正确的下载链接，而不是猜测文件名
-    DOWNLOAD_URL=$(echo "${API_RESPONSE}" | grep -oP "\"browser_download_url\": \"\K(.*)linux-${ARCH}\.zip(?=\")")
-    if [ -z "${DOWNLOAD_URL}" ]; then
-        log_error "未能在 API 响应中找到适用于 ${ARCH} 架构的下载链接。"
-    fi
-    
-    log_info "准备下载: ${DOWNLOAD_URL}"
-    rm -rf "${TMP_DIR}"
-    mkdir -p "${TMP_DIR}"
-    wget -O "${TMP_DIR}/mosdns-x.zip" "${DOWNLOAD_URL}"
-    if [ $? -ne 0 ]; then
-        log_error "下载失败，请检查网络连接。"
-    fi
-
-    # 4. 解压并安装
-    log_info "解压文件..."
-    unzip -o "${TMP_DIR}/mosdns-x.zip" -d "${TMP_DIR}"
-    if [ $? -ne 0 ]; then
-        log_error "解压失败。"
-    fi
-    
-    log_info "安装二进制文件到 ${INSTALL_PATH}/mosdns-x"
-    install -m 755 "${TMP_DIR}/mosdns-x" "${INSTALL_PATH}/mosdns-x"
-
-    # 5. 创建配置
-    create_config_file
-
-    # 6. 创建并启动服务
-    create_systemd_service
-    log_info "重载 systemd 服务..."
+# 启动并设置开机自启
+start_service() {
+    echo_info "正在重载 systemd 并启动 mosdns-x 服务..."
     systemctl daemon-reload
-    log_info "设置 mosdns-x 开机自启..."
-    systemctl enable mosdns-x
-    log_info "启动 mosdns-x 服务..."
-    systemctl start mosdns-x
-
-    # 7. 清理临时文件
-    log_info "清理临时文件..."
-    rm -rf "${TMP_DIR}"
+    systemctl enable mosdns-x > /dev/null 2>&1
+    systemctl restart mosdns-x
     
-    # 8. 检查状态
+    # 等待一小会儿，然后检查状态
     sleep 2
-    SERVICE_STATUS=$(systemctl is-active mosdns-x)
-    if [ "${SERVICE_STATUS}" = "active" ]; then
-        log_info "mosdns-x 安装成功并已成功启动！"
-        log_info "DNS 服务器正在监听: 127.0.0.1:5533 (TCP/UDP)"
-        log_info "您可以通过 'systemctl status mosdns-x' 查看服务状态。"
+    if systemctl is-active --quiet mosdns-x; then
+        echo_info "mosdns-x 服务已成功启动！"
     else
-        log_error "mosdns-x 服务启动失败。请运行 'journalctl -u mosdns-x -n 50' 查看日志以排查问题。"
+        echo_error "mosdns-x 服务启动失败。请使用 'journalctl -u mosdns-x' 查看日志。"
     fi
 }
 
-# 卸载 mosdns-x
-do_uninstall() {
-    log_info "开始卸载 mosdns-x..."
-
-    # 1. 停止并禁用服务
-    if [ -f "${SERVICE_PATH}" ]; then
-        log_info "停止并禁用 mosdns-x 服务..."
-        systemctl stop mosdns-x
-        systemctl disable mosdns-x
-    else
-        log_warn "未找到 systemd 服务文件，跳过服务停止步骤。"
-    fi
-
-    # 2. 删除文件
-    log_info "删除二进制文件: ${INSTALL_PATH}/mosdns-x"
-    rm -f "${INSTALL_PATH}/mosdns-x"
-    
-    log_info "删除配置文件目录: ${CONFIG_PATH}"
-    rm -rf "${CONFIG_PATH}"
-    
-    if [ -f "${SERVICE_PATH}" ]; then
-        log_info "删除 systemd 服务文件: ${SERVICE_PATH}"
-        rm -f "${SERVICE_PATH}"
-        log_info "重载 systemd 服务..."
-        systemctl daemon-reload
-    fi
-    
-    log_info "mosdns-x 卸载完成。"
+# 清理工作
+cleanup() {
+    echo_info "正在清理临时文件..."
+    rm -rf "$TMP_DIR"
 }
 
-# 显示用法
-show_usage() {
-    echo "用法: $0 [install|uninstall|reinstall]"
-    echo "  install    : 安装 mosdns-x"
-    echo "  uninstall  : 卸载 mosdns-x"
-    echo "  reinstall  : 重新安装 mosdns-x"
-}
-
-# --- 主逻辑 ---
+# --- 主程序 ---
 main() {
+    # 确保在脚本退出时执行清理
+    trap cleanup EXIT
+
     check_root
+    install_dependencies
+    get_latest_release
+    download_and_install
+    create_config_file
+    create_systemd_service
+    start_service
     
-    case "$1" in
-        install)
-            do_install
-            ;;
-        uninstall)
-            do_uninstall
-            ;;
-        reinstall)
-            log_info "开始重装 mosdns-x..."
-            do_uninstall
-            do_install
-            ;;
-        *)
-            show_usage
-            exit 1
-            ;;
-    esac
+    echo_info "============================================================"
+    echo_info "          mosdns-x 安装完成!"
+    echo_info "  配置文件: $CONFIG_PATH/config.yaml"
+    echo_info "  DNS 服务监听地址: 127.0.0.1:5533 (TCP/UDP)"
+    echo_info "  常用命令:"
+    echo_info "    - 启动服务: sudo systemctl start mosdns-x"
+    echo_info "    - 停止服务: sudo systemctl stop mosdns-x"
+    echo_info "    - 重启服务: sudo systemctl restart mosdns-x"
+    echo_info "    - 查看状态: sudo systemctl status mosdns-x"
+    echo_info "    - 查看日志: sudo journalctl -u mosdns-x -f"
+    echo_info "============================================================"
 }
 
-# 执行主函数
-main "$@"
+# 执行主程序
+main
