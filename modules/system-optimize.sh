@@ -1,6 +1,12 @@
 #!/bin/bash
-# 系统优化脚本 - 为Debian 13优化
-# 功能: 智能Zram配置, 时区与时间同步, 内核参数调优
+# ===================================================================================
+# 智能系统优化脚本 v6.5 - 为 Debian 13 Trixie 优化
+#
+# 功能:
+#   1. 智能 ZRAM 配置 (自动计算大小、算法和设备数)
+#   2. 时区与网络时间同步 (使用 Chrony)
+#   3. 关键内核参数调优 (Swappiness, Page Cluster)
+# ===================================================================================
 
 # --- 安全设置 ---
 # -e: 如果命令返回非零退出状态，则立即退出。
@@ -11,8 +17,8 @@ set -euo pipefail
 # --- 全局常量 ---
 readonly ZRAM_CONFIG_FILE="/etc/default/zramswap"
 readonly SYSCTL_CONFIG_FILE="/etc/sysctl.d/99-zram-optimize.conf"
-readonly SCRIPT_VERSION="6.2"
-# 当DEBUG=1时启用详细日志
+readonly SCRIPT_VERSION="6.5"
+# 设置为 1 以启用详细的调试日志
 readonly DEBUG="${DEBUG:-0}"
 
 # --- UI与日志函数 ---
@@ -20,7 +26,7 @@ readonly DEBUG="${DEBUG:-0}"
 # 统一的日志输出函数
 log() {
     local type="$1"
-    # FIX: Provide a default empty value for msg to avoid unbound variable error with `set -u`
+    # 为 msg 提供默认空值，以避免在 `set -u` 下出现未绑定变量的错误
     local msg="${2:-}"
     local color_ok="\033[0;32m"
     local color_info="\033[0;36m"
@@ -31,13 +37,13 @@ log() {
     local prefix=""
 
     case "$type" in
-        ok) prefix="[✓] " color="$color_ok" ;;
-        info) prefix="[i] " color="$color_info" ;;
-        warn) prefix="[!] " color="$color_warn" ;;
-        error) prefix="[✗] " color="$color_error" ;;
-        debug) [[ "$DEBUG" -eq 1 ]] || return 0; prefix="[DEBUG] " color="$color_debug" ;;
-        # If no type is specified, the first argument is the message itself
-        *) msg="$type"; prefix="    "; color="$color_reset" ;;
+        ok)    prefix="[✓] "; color="$color_ok" ;;
+        info)  prefix="[i] "; color="$color_info" ;;
+        warn)  prefix="[!] "; color="$color_warn" ;;
+        error) prefix="[✗] "; color="$color_error" ;;
+        debug) [[ "$DEBUG" -eq 1 ]] || return 0; prefix="[DEBUG] "; color="$color_debug" ;;
+        # 如果没有指定类型，则第一个参数是消息本身
+        *)     msg="$type"; prefix="    "; color="$color_reset" ;;
     esac
 
     # 使用printf以获得更好的格式控制
@@ -51,7 +57,7 @@ trap 'log "error" "脚本在第 $LINENO 行意外终止。"; exit 1' ERR
 print_banner() {
     echo -e "\033[0;34m"
     echo "======================================================"
-    echo "  智能系统优化脚本 v${SCRIPT_VERSION} - 为Debian 13优化"
+    echo "  智能系统优化脚本 v${SCRIPT_VERSION} - 为 Debian 13 优化"
     echo "======================================================"
     echo -e "\033[0m"
 }
@@ -99,19 +105,6 @@ install_packages() {
     fi
 }
 
-# 将不同单位的大小转换为MB
-convert_to_mb() {
-    local size_str
-    size_str=$(echo "$1" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
-    local val="${size_str//[^0-9.]/}"
-    case "$size_str" in
-        *G|*GB) awk "BEGIN {printf \"%.0f\", $val * 1024}" ;;
-        *M|*MB) awk "BEGIN {printf \"%.0f\", $val}" ;;
-        *K|*KB) awk "BEGIN {printf \"%.0f\", $val / 1024}" ;;
-        *) awk "BEGIN {printf \"%.0f\", $val / 1024 / 1024}" ;; # 默认为字节
-    esac
-}
-
 # 将MB格式化为易于阅读的GB或MB
 format_size() {
     local mb="$1"
@@ -140,7 +133,8 @@ cleanup_zram() {
     # 重置所有zram设备
     for dev in /sys/block/zram*; do
         if [[ -d "$dev" ]]; then
-            echo 1 > "$dev/reset" 2>/dev/null || true
+            # 使用 `tee` 写入，以处理权限问题并抑制错误
+            echo 1 | tee "$dev/reset" >/dev/null 2>&1 || true
             log "debug" "已重置设备: $(basename "$dev")"
         fi
     done
@@ -153,13 +147,14 @@ cleanup_zram() {
     log "debug" "ZRAM清理完成。"
 }
 
-# 智能决策矩阵，决定ZRAM配置
+# 智能决策矩阵，决定ZRAM配置 (算法, 乘数, 设备数)
 get_optimal_zram_config() {
     local mem_mb="$1"
     local cores="$2"
     local mem_category
+    local devices=1
 
-    if (( mem_mb < 1024 )); then mem_category="low"; fi       # <1GB
+    if (( mem_mb < 1024 )); then mem_category="low"; fi      # <1GB
     if (( mem_mb >= 1024 && mem_mb < 2048 )); then mem_category="medium"; fi # 1-2GB
     if (( mem_mb >= 2048 && mem_mb < 4096 )); then mem_category="high"; fi   # 2-4GB
     if (( mem_mb >= 4096 )); then mem_category="flagship"; fi # 4GB+
@@ -168,14 +163,18 @@ get_optimal_zram_config() {
 
     # 策略:
     # 算法: zstd是现代内核的默认选择，性能和压缩率俱佳。
-    # 设备: 多核CPU可以从多zram设备中受益，减少锁争用。
+    # 设备: 多核CPU可以从多zram设备中受益，减少锁争用。最多4个设备通常足够。
     # 乘数: 内存越小，zram/swap的需求越大，因此乘数更高。
+    if [[ "$cores" -ge 4 ]]; then
+        devices=$(( cores > 4 ? 4 : cores ))
+    fi
+
     case "$mem_category" in
-        "low")      echo "zstd,single,2.0" ;;
-        "medium")   echo "zstd,single,1.5" ;;
-        "high")     [[ "$cores" -ge 4 ]] && echo "zstd,multi,1.0" || echo "zstd,single,1.0" ;;
-        "flagship") [[ "$cores" -ge 4 ]] && echo "zstd,multi,0.75" || echo "zstd,single,0.8" ;;
-        *)          echo "zstd,single,1.0" ;; # 默认安全配置
+        "low")      echo "zstd,2.0,$devices" ;;
+        "medium")   echo "zstd,1.5,$devices" ;;
+        "high")     echo "zstd,1.0,$devices" ;;
+        "flagship") echo "zstd,0.75,$devices" ;;
+        *)          echo "zstd,1.0,1" ;; # 默认安全配置
     esac
 }
 
@@ -185,21 +184,27 @@ set_kernel_parameters() {
     local swappiness
     
     # 根据内存大小调整交换倾向
+    # 内存较小时，更积极地使用swap(zram)可以提高响应性
     if (( mem_mb <= 2048 )); then swappiness=80; else swappiness=60; fi
 
     log "info" "配置内核参数: swappiness=$swappiness, page-cluster=0 (优化ZRAM)"
 
     # 创建sysctl配置文件
-    # page-cluster=0: 减少写入ZRAM的数据块大小，提高压缩效率。
+    # vm.page-cluster = 0: 禁用页面聚簇。
+    #   当页面被换出时，内核通常会尝试一次性写入多个相邻页面（一个簇）。
+    #   对于ZRAM这种基于块的压缩设备，一次只写入一个页面（4KB）可以提高压缩效率，
+    #   避免将未使用的“邻居”页面也一并压缩，从而浪费CPU和内存。
     cat > "$SYSCTL_CONFIG_FILE" << EOF
 # 由系统优化脚本 v${SCRIPT_VERSION} 自动生成
+# 优化ZRAM性能
 vm.swappiness = $swappiness
 vm.page-cluster = 0
 EOF
 
     # 智能禁用zswap：仅在zswap模块存在时才禁用，避免在不支持的内核上报错。
+    # ZSwap是ZRAM的替代方案，两者不应同时使用。
     if [[ -d "/sys/module/zswap" ]]; then
-        log "debug" "检测到ZSwap模块，将其禁用以优化ZRAM。"
+        log "debug" "检测到ZSwap模块，将其禁用以避免与ZRAM冲突。"
         echo "zswap.enabled = 0" >> "$SYSCTL_CONFIG_FILE"
     fi
 
@@ -221,13 +226,13 @@ setup_zram() {
     # 1. 获取最优配置
     local config
     config=$(get_optimal_zram_config "$mem_mb" "$cores")
-    local algorithm device_type multiplier
-    IFS=',' read -r algorithm device_type multiplier <<< "$config"
+    local algorithm multiplier devices
+    IFS=',' read -r algorithm multiplier devices <<< "$config"
 
     # 2. 计算目标ZRAM大小
     local target_size_mb
     target_size_mb=$(awk "BEGIN {printf \"%.0f\", $mem_mb * $multiplier}")
-    log "决策: 使用 $algorithm 算法, $device_type 设备模式, ZRAM大小为 $(format_size "$target_size_mb")"
+    log "决策: 使用 $algorithm 算法, ZRAM大小为 $(format_size "$target_size_mb"), 分配 ${devices} 个设备"
 
     # 3. 检查当前配置是否满足要求
     local current_zram_size_mb=0
@@ -237,15 +242,10 @@ setup_zram() {
         current_zram_devices=$(swapon --show --noheadings | grep -c zram)
     fi
     
-    local expected_devices=1
-    if [[ "$device_type" == "multi" ]]; then
-        expected_devices=$(( cores > 4 ? 4 : cores )) # 最多4个设备
-    fi
-
     local min_size=$((target_size_mb * 90 / 100))
     local max_size=$((target_size_mb * 110 / 100))
 
-    if (( current_zram_size_mb >= min_size && current_zram_size_mb <= max_size && current_zram_devices == expected_devices )); then
+    if (( current_zram_size_mb >= min_size && current_zram_size_mb <= max_size && current_zram_devices == devices )); then
         log "ok" "当前ZRAM配置已是最佳，无需更改。"
         set_kernel_parameters "$mem_mb" # 仍然确保内核参数是最优的
         return 0
@@ -260,15 +260,18 @@ setup_zram() {
     install_packages zram-tools
 
     # 写入zram-tools配置文件
+    # 注意: zram-tools也支持 /etc/zramswap.conf, 但 /etc/default/zramswap 格式更简单且兼容。
     cat > "$ZRAM_CONFIG_FILE" << EOF
+# 由系统优化脚本 v${SCRIPT_VERSION} 自动生成
 ALGO=$algorithm
 SIZE=$target_size_mb
+NUM_DEVICES=$devices
 PRIORITY=100
 EOF
 
     # 5. 启动服务并验证
     if ! systemctl restart zramswap.service; then
-        log "error" "启动zramswap服务失败。请检查系统日志。"
+        log "error" "启动zramswap服务失败。请检查系统日志 (journalctl -u zramswap.service)。"
         return 1
     fi
     systemctl enable zramswap.service &>/dev/null
@@ -303,6 +306,7 @@ setup_timezone() {
     echo "  6) 自定义输入"
     echo "  7) 保持当前 ($current_tz)"
     
+    # 从 /dev/tty 读取，确保即使用户通过管道运行脚本也能进行交互
     read -rp "输入选项 [1-7]: " choice < /dev/tty
     choice=${choice:-1}
     
@@ -343,25 +347,24 @@ setup_chrony() {
 
     install_packages chrony
 
-    if ! systemctl is-enabled --quiet chrony; then
-        systemctl enable chrony &>/dev/null
-    fi
-
-    if ! systemctl restart chrony; then
+    # 使用 enable --now 可以一步完成启用和启动
+    if ! systemctl enable --now chrony &>/dev/null; then
         log "error" "启动Chrony服务失败。"
         return 1
     fi
     
-    log "info" "等待Chrony与上游服务器同步..."
-    sleep 5 # 等待chrony初始化
-
-    if chronyc tracking | grep -q "System clock synchronized.*yes"; then
-        local stratum
-        stratum=$(chronyc tracking | awk '/Stratum/ {print $2}')
-        log "ok" "时间同步成功 (Chrony, Stratum: $stratum)。"
-    else
-        log "warn" "Chrony正在运行，但尚未与时间服务器同步。这可能需要几分钟。"
-    fi
+    log "info" "等待Chrony与上游服务器同步 (最多30秒)..."
+    for _ in {1..6}; do
+        if chronyc tracking | grep -q "System clock synchronized.*yes"; then
+            local stratum
+            stratum=$(chronyc tracking | awk '/Stratum/ {print $2}')
+            log "ok" "时间同步成功 (Chrony, Stratum: $stratum)。"
+            return 0
+        fi
+        sleep 5
+    done
+    
+    log "warn" "Chrony正在运行，但尚未与时间服务器完全同步。这可能需要几分钟时间。"
 }
 
 # --- 主流程 ---
@@ -371,6 +374,17 @@ main() {
     
     print_banner
     
+    # 检查操作系统版本
+    if [ -f /etc/os-release ]; then
+        # shellcheck source=/dev/null
+        . /etc/os-release
+        if [[ "${ID:-}" != "debian" || "${VERSION_ID:-}" != "13" ]]; then
+            log "warn" "此脚本专为Debian 13优化，在 ${PRETTY_NAME:-未知系统} 上运行可能效果不同。"
+        fi
+    else
+        log "warn" "无法确定操作系统版本。"
+    fi
+
     # 检查网络连接
     if ! ping -c 1 pool.ntp.org &>/dev/null; then
         log "warn" "无法访问外部网络。软件包安装和时间同步可能会失败。"
@@ -383,7 +397,7 @@ main() {
     done
 
     # 确保核心工具存在
-    install_packages bc util-linux procps
+    install_packages util-linux procps
     
     # 执行优化
     setup_zram
@@ -399,7 +413,8 @@ main() {
     swapon --show
     local final_swappiness
     final_swappiness=$(cat /proc/sys/vm/swappiness)
-    log "ok" "内核参数: vm.swappiness = $final_swappiness"
+    printf "%-20s: %s\n" "  vm.swappiness" "$final_swappiness"
+    printf "%-20s: %s\n" "  vm.page-cluster" "$(cat /proc/sys/vm/page-cluster)"
     log "ok" "当前时间:"
     timedatectl status | head -n 3
     echo
@@ -407,4 +422,5 @@ main() {
 }
 
 # 运行主函数
-main "$@"
+main
+
