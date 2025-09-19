@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 REALM_INSTALL_DIR="/usr/local/bin"
 REALM_CONFIG_DIR="/etc/realm"
 REALM_LOG_DIR="/var/log/realm"
-REALM_CONFIG_FILE="${REALM_CONFIG_DIR}/config.json" # <--- 已修改为 config.json
+REALM_CONFIG_FILE="${REALM_CONFIG_DIR}/config.json"
 REALM_SERVICE_FILE="/etc/systemd/system/realm.service"
 REALM_EXECUTABLE="${REALM_INSTALL_DIR}/realm"
 
@@ -141,9 +141,7 @@ download_realm() {
         exit 1
     fi
     
-    # 将解压后的文件路径存入全局变量，方便后续使用
     REALM_TEMP_FILE="${temp_dir}/realm"
-    
     print_success "下载并解压成功。"
 }
 
@@ -151,14 +149,10 @@ download_realm() {
 install_realm() {
     print_info "安装 Realm 主程序..."
     
-    # 创建所需目录
     mkdir -p "$REALM_INSTALL_DIR" "$REALM_CONFIG_DIR" "$REALM_LOG_DIR"
-    
-    # 移动可执行文件
     mv "$REALM_TEMP_FILE" "$REALM_EXECUTABLE"
     chmod +x "$REALM_EXECUTABLE"
     
-    # 清理临时目录
     rm -rf "$(dirname "$REALM_TEMP_FILE")"
     
     print_success "Realm 已安装到: $REALM_EXECUTABLE"
@@ -168,7 +162,6 @@ install_realm() {
 create_config() {
     print_info "创建 JSON 配置文件..."
     
-    # 使用 cat 和 EOF 创建 JSON 配置文件，注意转义
     cat > "$REALM_CONFIG_FILE" << EOF
 {
     "log": {
@@ -185,6 +178,34 @@ create_config() {
 EOF
 
     print_success "配置文件创建成功: $REALM_CONFIG_FILE"
+}
+
+# --- 新增函数：设置文件和目录权限 ---
+set_permissions() {
+    print_info "设置相关目录和文件的权限..."
+
+    # 确定运行用户和组，兼容不同系统
+    local run_user="nobody"
+    local run_group="nogroup"
+    if ! getent group "$run_group" >/dev/null; then
+        if getent group "nobody" >/dev/null; then
+            run_group="nobody" # 兼容 CentOS 等系统
+        else
+            print_warning "找不到 'nogroup' 或 'nobody' 用户组，跳过权限设置。"
+            return
+        fi
+    fi
+
+    # 授权配置目录
+    chown -R "${run_user}:${run_group}" "$REALM_CONFIG_DIR"
+    chmod 755 "$REALM_CONFIG_DIR"
+    chmod 644 "$REALM_CONFIG_FILE"
+
+    # 授权日志目录
+    chown -R "${run_user}:${run_group}" "$REALM_LOG_DIR"
+    chmod 775 "$REALM_LOG_DIR"
+
+    print_success "权限设置完成。"
 }
 
 # 创建 systemd 服务文件
@@ -278,6 +299,7 @@ do_install() {
     download_realm
     install_realm
     create_config
+    set_permissions  # <--- 在此处调用新增的权限设置函数
     create_service
     show_usage
     
@@ -309,7 +331,6 @@ do_update() {
     mv "$REALM_TEMP_FILE" "$REALM_EXECUTABLE"
     chmod +x "$REALM_EXECUTABLE"
     
-    # 清理临时目录
     rm -rf "$(dirname "$REALM_TEMP_FILE")"
     
     print_info "正在启动新版服务..."
@@ -324,7 +345,6 @@ do_update() {
 main() {
     check_root
     
-    # 脚本参数处理
     if [[ $# -gt 0 ]]; then
         case $1 in
             install) do_install ;;
@@ -335,7 +355,6 @@ main() {
         exit 0
     fi
 
-    # 交互式菜单
     echo "================================="
     echo "    Realm 一键安装配置脚本"
     echo "================================="
