@@ -18,8 +18,6 @@ readonly SUMMARY_FILE="/root/deployment_summary_custom.txt"
 #--- 模块定义 ---
 declare -A MODULES=(
     ["system-optimize"]="系统优化 (Zram, 时区, 时间同步)"
-    ["docker-setup"]="Docker 容器化平台"
-    ["tools-setup"]="系统工具 (NextTrace, SpeedTest等)"
     ["auto-update-setup"]="自动更新系统"
     ["kernel-optimize"]="内核参数深度优化 (TCP BBR, 文件句柄等)"
 )
