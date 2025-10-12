@@ -10,7 +10,7 @@
 set -euo pipefail
 
 #--- 全局常量 ---
-readonly MODULE_BASE_URL="https://raw.githubusercontent.com/nnversace/winter/refs/heads/main/modules"
+readonly MODULE_BASE_URL="https://raw.githubusercontent.com/nnversace/winter/main/modules"
 readonly TEMP_DIR="/tmp/debian-setup-modules"
 readonly LOG_FILE="/var/log/debian-custom-setup.log"
 readonly SUMMARY_FILE="/root/deployment_summary_custom.txt"
