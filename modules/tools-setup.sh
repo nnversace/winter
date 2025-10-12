@@ -1,6 +1,31 @@
+好的，这是一个重构和优化后的版本。新脚本在逻辑上更清晰、更健壮，并完全采纳了您提出的 nexttrace 使用官方 apt 源进行安装的思路。
+
+主要优化点：
+
+逻辑更清晰：将 nexttrace 的特殊处理逻辑（如添加源、迁移旧版本）完全整合到安装流程中，而不是在主循环外单独处理，使得每个工具的安装过程更加独立和内聚。
+
+更强的幂等性：脚本可以反复安全运行。每次运行时，它都会检查现有状态（工具是否安装、源是否存在），只执行必要的操作，避免重复工作或出错。
+
+错误处理更精确：对添加源、更新 apt 缓存和安装软件包等关键步骤都进行了独立的错误捕获和日志输出，方便快速定位问题。
+
+代码简化：移除了 handle_existing_nexttrace 函数。通过 apt 的优先级处理，即使存在旧的手动安装版本，apt install 通常也能正确覆盖，简化了迁移逻辑。脚本现在直接尝试删除已知的旧路径，逻辑更直接。
+
+可读性和可维护性：增加了更多注释，函数职责更单一，主流程 main 函数的逻辑一目了然。
+
+版本检查优化：摘要部分的版本检查命令更加健壮，能更好地处理某些工具版本输出的多行情况。
+
+常量和变量：使用了更清晰的变量名，并保持 readonly 用于不可变数据。
+
+重构后的优化脚本
+code
+Bash
+download
+content_copy
+expand_less
 #!/bin/bash
 # 系统工具一键安装脚本 - for Debian 13
 # 功能: 非交互式地安装常用系统和网络工具，并自动处理依赖和迁移。
+# 特点: 幂等设计，可安全重复运行；自动为 nexttrace 配置官方 apt 源。
 
 # --- 脚本配置 ---
 # 遇到错误时立即退出
@@ -8,16 +33,20 @@ set -euo pipefail
 
 # --- 常量定义 ---
 # 工具列表定义
-# 格式: "命令名称:版本检查命令:安装包名或源:工具描述"
+# 格式: "命令名称:安装包名:工具描述"
+# 说明: 'apt-nexttrace' 是一个特殊标识，用于触发添加源的逻辑。
 readonly TOOLS=(
-    "nexttrace:nexttrace --version:apt-nexttrace:强大的网络路由追踪工具"
-    "speedtest:speedtest --version:speedtest-cli:命令行网络测速工具"
-    "htop:htop --version:htop:交互式进程查看器"
-    "jq:jq --version:jq:JSON 命令行处理工具"
-    "tree:tree --version:tree:以树状图列出目录内容"
-    "curl:curl --version:curl:强大的数据传输工具"
-    "wget:wget --version:wget:非交互式文件下载工具"
+    "nexttrace:apt-nexttrace:强大的网络路由追踪工具"
+    "speedtest:speedtest-cli:命令行网络测速工具"
+    "htop:htop:交互式进程查看器"
+    "jq:jq:JSON 命令行处理工具"
+    "tree:tree:以树状图列出目录内容"
+    "curl:curl:强大的数据传输工具"
+    "wget:wget:非交互式文件下载工具"
 )
+
+# nexttrace 官方 apt 源配置文件路径
+readonly NEXTTRACE_APT_SOURCE_FILE="/etc/apt/sources.list.d/nexttrace.list"
 
 # --- 日志函数 ---
 # 带有颜色的日志输出
@@ -25,15 +54,15 @@ readonly TOOLS=(
 # 参数2: 日志级别 (info, warn, error, success)
 log() {
     local msg="$1" level="${2:-info}"
-    local color_prefix
+    local color_prefix=""
     case "$level" in
         info) color_prefix="\033[0;36m" ;;  # 青色
         warn) color_prefix="\033[0;33m" ;;  # 黄色
         error) color_prefix="\033[0;31m" ;; # 红色
         success) color_prefix="\033[0;32m" ;; # 绿色
-        *) color_prefix="\033[0m" ;;
     esac
-    echo -e "${color_prefix} [${level^^}] ${msg}\033[0m"
+    # 将日志输出到 stderr，以区分脚本的正常输出
+    >&2 echo -e "${color_prefix}[${level^^}] ${msg}\033[0m"
 }
 
 # --- 核心功能函数 ---
@@ -46,33 +75,54 @@ check_root() {
     fi
 }
 
-# 处理现有的 nexttrace 安装（从脚本迁移到 apt）
-handle_existing_nexttrace() {
-    # 刷新命令缓存，确保检测准确
-    hash -r 2>/dev/null || true
+# 迁移旧的手动安装版 nexttrace
+# 即使 apt 可以覆盖，也建议清理旧文件以避免 PATH 混乱
+migrate_old_nexttrace() {
+    # 查找旧的、非 dpkg 管理的 nexttrace 路径
+    local old_path
+    old_path=$(command -v nexttrace || true)
     
-    # 如果命令不存在，则无需迁移
-    if ! command -v nexttrace >/dev/null 2>&1; then
+    if [[ -n "$old_path" && ! $(dpkg-query -S "$old_path" 2>/dev/null) ]]; then
+        log "检测到旧版手动安装的 nexttrace，将尝试移除: $old_path" "warn"
+        if rm -f "$old_path"; then
+            log "已移除旧版本。" "success"
+            hash -r # 清理 shell 的命令路径缓存
+        else
+            log "移除旧版本失败，请手动检查: $old_path" "error"
+        fi
+    fi
+}
+
+# 为 nexttrace 配置官方 apt 源
+setup_nexttrace_repo() {
+    if [[ -f "$NEXTTRACE_APT_SOURCE_FILE" ]]; then
+        log "nexttrace apt 源已存在，无需配置。" "info"
         return 0
     fi
     
-    # 检查是否已通过 apt 安装
-    if dpkg-query -W -f='${Status}' nexttrace 2>/dev/null | grep -q "install ok installed"; then
-        return 0 # 已经是 apt 安装，无需迁移
+    log "正在为 nexttrace 配置官方 apt 源..." "info"
+    
+    # 定义源内容
+    local repo_line="deb [signed-by=/usr/share/keyrings/nexttrace.gpg] https://github.com/nxtrace/nexttrace-debs/releases/latest/download ./"
+    local gpg_key_url="https://github.com/nxtrace/nexttrace-debs/raw/main/nexttrace.gpg"
+    local gpg_key_path="/usr/share/keyrings/nexttrace.gpg"
+
+    # 使用 curl 下载 GPG 密钥
+    if ! curl -fsSL "$gpg_key_url" -o "$gpg_key_path"; then
+        log "下载 nexttrace GPG 密钥失败。" "error"
+        return 1
     fi
     
-    log "检测到旧版脚本安装的 nexttrace，将自动迁移到 apt 源..." "warn"
-    
-    # 删除旧的脚本安装版本
-    local old_path
-    old_path=$(command -v nexttrace)
-    if [[ -n "$old_path" && -f "$old_path" ]]; then
-        rm -f "$old_path"
-        log "已删除旧版本: $old_path" "info"
+    # 写入源配置文件
+    if ! echo "$repo_line" | tee "$NEXTTRACE_APT_SOURCE_FILE" > /dev/null; then
+        log "写入 nexttrace apt 源配置失败。" "error"
+        rm -f "$gpg_key_path" # 清理失败时下载的密钥
+        return 1
     fi
     
-    # 清理 PATH 缓存，为新安装做准备
-    hash -r 2>/dev/null || true
+    log "nexttrace apt 源配置成功，将刷新 apt 列表。" "success"
+    # 添加新源后，强制执行一次更新
+    apt-get update -qq
 }
 
 # 安装单个工具
@@ -80,32 +130,27 @@ install_tool() {
     local tool_name="$1"
     local install_source="$2"
     
-    log "正在安装 $tool_name..." "info"
+    log "--- 开始安装 $tool_name ---" "info"
     
-    local success=false
+    local package_name="$install_source"
     
-    # 针对 nexttrace 的特殊 apt 源安装逻辑
+    # 特殊处理 nexttrace：配置源并设置正确的包名
     if [[ "$install_source" == "apt-nexttrace" ]]; then
-        # 添加官方 apt 源（如果不存在）
-        if [[ ! -f /etc/apt/sources.list.d/nexttrace.list ]]; then
-            log "配置 nexttrace 官方 apt 源..." "info"
-            echo "deb [trusted=yes] https://github.com/nxtrace/nexttrace-debs/releases/latest/download ./" | tee /etc/apt/sources.list.d/nexttrace.list >/dev/null
+        migrate_old_nexttrace
+        if ! setup_nexttrace_repo; then
+            log "$tool_name 的前置配置失败，跳过安装。" "error"
+            return 1
         fi
-        # 更新包列表并安装
-        if apt-get install -y nexttrace --allow-unauthenticated >/dev/null 2>&1; then
-            success=true
-        fi
-    else
-        # 标准 apt 包安装
-        if apt-get install -y "$install_source" >/dev/null 2>&1; then
-            success=true
-        fi
+        package_name="nexttrace" # 将包名修正为实际的 apt 包名
     fi
     
-    if $success; then
+    # 执行安装
+    log "正在通过 apt 安装 $package_name..." "info"
+    if apt-get install -y "$package_name" >/dev/null; then
         log "$tool_name 安装成功。" "success"
     else
-        log "$tool_name 安装失败。" "error"
+        log "$tool_name ($package_name) 安装失败，请检查 apt 输出。" "error"
+        return 1
     fi
     return 0
 }
@@ -116,13 +161,14 @@ show_summary() {
     log "========== 系统工具配置摘要 ==========" "info"
     
     for tool_info in "${TOOLS[@]}"; do
-        local tool_name="${tool_info%%:*}"
-        local description="${tool_info##*:}"
+        IFS=':' read -r tool_name _ description <<< "$tool_info"
         
         if command -v "$tool_name" &>/dev/null; then
+            # 尝试获取版本信息，优先使用 --version，失败则尝试 -V
             local version_output
-            # 尝试获取版本号
-            version_output=$($tool_name --version 2>/dev/null | head -n1 || echo "版本未知")
+            version_output=$($tool_name --version 2>/dev/null || $tool_name -V 2>/dev/null || echo "版本未知")
+            # 清理版本输出，只取第一行
+            version_output=$(echo "$version_output" | head -n 1)
             log "✓ ${tool_name} - ${description} (已安装: ${version_output})" "success"
         else
             log "✗ ${tool_name} - ${description} (未安装)" "warn"
@@ -135,7 +181,7 @@ show_summary() {
     echo "  - 网络速度测试: speedtest"
     echo "  - 系统进程监控: htop"
     echo "  - 目录结构查看: tree /some/path"
-    echo "  - JSON 格式化: echo '{\"key\":\"value\"}' | jq"
+    echo "  - JSON 格式化: echo '{\"key\":\"value\"}' | jq ."
     log "========================================" "info"
 }
 
@@ -145,9 +191,9 @@ main() {
     check_root
     log "开始自动化配置系统工具 (Debian 13)..." "info"
     
-    # 1. 更新 apt 包列表
+    # 1. 初始更新 apt 包列表
     log "正在更新 apt 包列表..." "info"
-    if ! apt-get update -qq >/dev/null 2>&1; then
+    if ! apt-get update -qq; then
         log "apt 更新失败，请检查您的网络或软件源配置。" "error"
         exit 1
     fi
@@ -155,13 +201,7 @@ main() {
     
     # 2. 遍历并安装所有工具
     for tool_info in "${TOOLS[@]}"; do
-        # 解析工具信息
-        IFS=':' read -r tool_name check_cmd install_source description <<< "$tool_info"
-        
-        # 特殊处理 nexttrace 的迁移
-        if [[ "$tool_name" == "nexttrace" ]]; then
-            handle_existing_nexttrace
-        fi
+        IFS=':' read -r tool_name install_source description <<< "$tool_info"
         
         # 检查工具是否已安装
         if command -v "$tool_name" &>/dev/null; then
