@@ -9,6 +9,8 @@ readonly CUSTOM_ZRAM_SCRIPT="/usr/local/sbin/custom-zram-setup.sh"
 readonly SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/zramswap.service.d"
 readonly SYSTEMD_OVERRIDE_FILE="${SYSTEMD_OVERRIDE_DIR}/override.conf"
 readonly DEFAULT_TIMEZONE="Asia/Shanghai"
+readonly -a APT_INSTALL_OPTS=(--no-install-recommends)
+APT_UPDATED=0
 
 # === 日志函数 ===
 log() {
@@ -33,6 +35,111 @@ convert_to_mb() {
         *K|*KB) awk "BEGIN {printf \"%.0f\", $value / 1024}" ;;
         *)      awk "BEGIN {printf \"%.0f\", $value / 1024 / 1024}" ;;
     esac
+}
+
+calculate_target_size() {
+    local mem_mb="$1" multiplier="$2"
+    awk -v mem="$mem_mb" -v mul="$multiplier" 'BEGIN {printf "%.0f", mem * mul}'
+}
+
+is_pkg_installed() {
+    local pkg="$1"
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"
+}
+
+apt_update_once() {
+    ((APT_UPDATED)) && return 0
+
+    log "APT: 同步软件包索引..." "info"
+    if DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+        APT_UPDATED=1
+    else
+        log "APT: 更新软件包索引失败，请检查网络或软件源配置" "error"
+        return 1
+    fi
+}
+
+ensure_packages() {
+    local packages=("$@") missing=()
+
+    for pkg in "${packages[@]}"; do
+        is_pkg_installed "$pkg" || missing+=("$pkg")
+    done
+
+    (( ${#missing[@]} == 0 )) && return 0
+
+    apt_update_once || return 1
+
+    log "APT: 安装依赖 -> ${missing[*]}" "info"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_INSTALL_OPTS[@]}" "${missing[@]}" >/dev/null 2>&1; then
+        log "APT: 安装 ${missing[*]} 失败" "error"
+        return 1
+    fi
+}
+
+ensure_algorithm_supported() {
+    local requested="$1" temp_loaded=0 algorithms_file="/sys/block/zram0/comp_algorithm"
+
+    if [[ ! -r "$algorithms_file" ]]; then
+        if ! lsmod | awk '{print $1}' | grep -qx "zram"; then
+            if modprobe zram num_devices=1 2>/dev/null; then
+                temp_loaded=1
+            else
+                log "无法加载zram模块以检测压缩算法支持，继续使用 $requested" "warn"
+                echo "$requested"
+                return 0
+            fi
+        fi
+    fi
+
+    if [[ -r "$algorithms_file" ]]; then
+        local available
+        available=$(<"$algorithms_file")
+        if ! grep -qw "$requested" <<< "$available"; then
+            local fallback
+            fallback=$(awk '{for(i=1;i<=NF;i++){gsub(/\[|\]/,"",$i); if(length($i)){print $i; exit}}}' <<< "$available")
+            fallback=${fallback:-lzo}
+            log "压缩算法 $requested 不受支持，改用 $fallback" "warn"
+            requested="$fallback"
+        fi
+    else
+        log "无法读取压缩算法支持列表，继续使用 $requested" "warn"
+    fi
+
+    if (( temp_loaded )); then
+        modprobe -r zram 2>/dev/null || true
+    fi
+
+    echo "$requested"
+}
+
+check_debian_version() {
+    local os_release="/etc/os-release"
+
+    if [[ -r "$os_release" ]]; then
+        # shellcheck disable=SC1090
+        . "$os_release"
+
+        if [[ "${ID:-}" != "debian" ]]; then
+            log "检测到系统 ${PRETTY_NAME:-unknown}，脚本仍将按Debian进行优化" "warn"
+            return
+        fi
+
+        local major="${VERSION_ID%%.*}"
+        if [[ "$major" =~ ^[0-9]+$ ]]; then
+            if (( major < 12 )); then
+                log "当前Debian版本(${VERSION_ID})较旧，部分优化可能无法生效" "warn"
+            elif (( major > 13 )); then
+                log "当前Debian版本(${VERSION_ID})较新，请留意兼容性" "warn"
+            else
+                log "检测到Debian ${VERSION_ID:-unknown}，应用针对性优化" "info"
+            fi
+        else
+            log "无法解析Debian版本号(${VERSION_ID:-unknown})，默认继续" "warn"
+        fi
+    else
+        log "无法读取系统版本信息，默认按Debian进行优化" "warn"
+    fi
 }
 
 format_size() {
@@ -244,6 +351,9 @@ for i in \$(seq 0 \$(( ${device_count} - 1 )) ); do
     fi
 
     echo "${algorithm}" > "/sys/block/zram\$i/comp_algorithm"
+    if [[ -f "/sys/block/zram\$i/max_comp_streams" ]]; then
+        echo 0 > "/sys/block/zram\$i/max_comp_streams"
+    fi
     echo "\${per_device_mb}M" > "/sys/block/zram\$i/disksize"
     mkswap "\$dev"
     swapon "\$dev" -p "${priority}"
@@ -292,14 +402,13 @@ setup_zram() {
     local multiplier=$(echo "$config" | cut -d, -f3)
     
     local target_size_mb
-    if command -v bc >/dev/null 2>&1; then
-        target_size_mb=$(awk "BEGIN {printf \"%.0f\", $mem_mb * $multiplier}")
-    else
-        target_size_mb=$(( mem_mb * ${multiplier/./} / ${multiplier/.*} ))
-    fi
-    
+    target_size_mb=$(calculate_target_size "$mem_mb" "$multiplier")
+
     local device_count=1
-    [[ "$device_type" == "multi" ]] && device_count=$((cores > 4 ? 4 : cores))
+    if [[ "$device_type" == "multi" ]]; then
+        device_count=$(( cores > 8 ? 8 : cores ))
+        (( device_count > 0 )) || device_count=1
+    fi
     
     echo "决策: 目标大小=$(format_size "$target_size_mb"), 算法=$algorithm, ${device_count}个设备"
     
@@ -329,13 +438,12 @@ setup_zram() {
     log "当前配置不匹配，开始重新配置..." "info"
     cleanup_zram_completely
 
+    algorithm=$(ensure_algorithm_supported "$algorithm")
+
     # 安装zram-tools以获取基础服务文件
-    if ! dpkg -l zram-tools &>/dev/null; then
-        log "安装zram-tools以提供服务框架..." "info"
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null 2>&1 || {
-            log "zram-tools安装失败" "error"; return 1;
-        }
+    if ! ensure_packages zram-tools; then
+        log "zram-tools安装失败" "error"
+        return 1
     fi
     
     # 设置内核参数并获取优先级
@@ -390,26 +498,36 @@ setup_timezone() {
 
 # 配置Chrony
 setup_chrony() {
-    if command -v chronyd &>/dev/null && systemctl is-active chrony &>/dev/null; then
-        if chronyc tracking 2>/dev/null | grep -q "System clock synchronized.*yes"; then
+    local chrony_service="chrony.service"
+    if systemctl list-unit-files chrony.service >/dev/null 2>&1; then
+        chrony_service="chrony.service"
+    elif systemctl list-unit-files chronyd.service >/dev/null 2>&1; then
+        chrony_service="chronyd.service"
+    fi
+
+    if command -v chronyc &>/dev/null && systemctl is-active "$chrony_service" &>/dev/null; then
+        local synced_flag
+        synced_flag=$(timedatectl show --property=SystemClockSynchronized --value 2>/dev/null || echo "no")
+        if [[ "${synced_flag,,}" == "yes" ]] || chronyc tracking 2>/dev/null | grep -qi "Leap status.*Normal"; then
             echo "时间同步: Chrony (已同步)"; return 0;
         fi
     fi
     
-    systemctl stop systemd-timesyncd 2>/dev/null || true
-    systemctl disable systemd-timesyncd 2>/dev/null || true
-    
-    if ! command -v chronyd &>/dev/null; then
-        apt-get install -y chrony >/dev/null 2>&1 || {
-            log "Chrony安装失败" "error"; return 1;
-        }
+    if [[ -f /lib/systemd/system/systemd-timesyncd.service ]]; then
+        systemctl stop systemd-timesyncd 2>/dev/null || true
+        systemctl disable systemd-timesyncd 2>/dev/null || true
     fi
-    
-    systemctl enable chrony >/dev/null 2>&1
-    systemctl restart chrony >/dev/null 2>&1
-    
+
+    if ! ensure_packages chrony; then
+        log "Chrony安装失败" "error"
+        return 1
+    fi
+
+    systemctl enable "$chrony_service" >/dev/null 2>&1
+    systemctl restart "$chrony_service" >/dev/null 2>&1
+
     sleep 2
-    if systemctl is-active chrony &>/dev/null; then
+    if systemctl is-active "$chrony_service" &>/dev/null; then
         local sources_count=$(chronyc sources 2>/dev/null | grep -c "^\^" || echo "0")
         echo "时间同步: Chrony (${sources_count}个时间源)"
     else
@@ -420,7 +538,9 @@ setup_chrony() {
 # === 主流程 ===
 main() {
     [[ $EUID -eq 0 ]] || { log "需要root权限运行" "error"; exit 1; }
-    
+
+    check_debian_version
+
     local wait_count=0
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
         ((wait_count++))
@@ -432,17 +552,18 @@ main() {
         fi
         sleep 10
     done
-    
-    for cmd in awk swapon systemctl timedatectl; do
+
+    for cmd in awk swapon systemctl timedatectl modprobe lsmod apt-get; do
         command -v "$cmd" &>/dev/null || { log "缺少必要命令: $cmd" "error"; exit 1; }
     done
-    
+
     if ! command -v bc &>/dev/null; then
-        log "安装必需的依赖: bc" "info"
-        apt-get install -y bc >/dev/null 2>&1 || log "bc安装失败，将使用备用计算方法" "warn"
+        if ! ensure_packages bc; then
+            log "bc安装失败，将使用备用计算方法" "warn"
+        fi
     fi
-    
-    export SYSTEMD_PAGER="" PAGER=""
+
+    export SYSTEMD_PAGER="" PAGER="" DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
     
     log "🔧 开始全自动系统优化..." "info"
     
