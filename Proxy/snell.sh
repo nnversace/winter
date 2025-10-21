@@ -8,6 +8,8 @@ SERVICE_NAME="snell"
 CONFIG_DIR="/etc/snell"
 CONFIG_PATH="${CONFIG_DIR}/snell-server.conf"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+SNELL_PORT=53100
+SNELL_PSK="IUmuU/NjIQhHPMdBz5WONA=="
 
 log_info() {
   printf '\033[32m[INFO]\033[0m %s\n' "$*"
@@ -56,15 +58,6 @@ detect_arch() {
       exit 1
       ;;
   esac
-}
-
-generate_psk() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 16
-  else
-    log_warn "未找到 openssl，使用 /dev/urandom 生成 PSK"
-    head -c 16 /dev/urandom | base64
-  fi
 }
 
 validate_port() {
@@ -161,14 +154,10 @@ main() {
   local arch port psk
   arch=$(detect_arch)
 
-  port="${PORT:-53100}"
+  port="$SNELL_PORT"
   validate_port "$port"
 
-  if [[ -n "${PSK:-}" ]]; then
-    psk="$PSK"
-  else
-    psk=$(generate_psk)
-  fi
+  psk="$SNELL_PSK"
 
   if systemctl is-active --quiet "$SERVICE_NAME"; then
     log_info "检测到已运行的 Snell 服务，正在停止..."
