@@ -12,7 +12,7 @@
 # 默认参数(可通过环境变量覆盖):
 #   PSK  : IUmuU/NjIQhHPMdBz5WONA==
 #   PORT : 53100
-#   SNELL_VERSION : 5.0.1
+#   SNELL_VERSION : 5.0.0
 #
 # 使用示例:
 #   sudo PSK="your_psk" PORT=12345 ./snell-v5-install.sh
@@ -22,8 +22,7 @@ set -euo pipefail
 
 readonly DEFAULT_PSK="IUmuU/NjIQhHPMdBz5WONA=="
 readonly DEFAULT_PORT="53100"
-readonly DEFAULT_VERSION="5.0.1"
-readonly VERSION_FALLBACKS=("5.0.0")
+readonly DEFAULT_VERSION="5.0.0"
 readonly INSTALL_PATH="/usr/local/bin"
 readonly CONFIG_DIR="/etc/snell"
 readonly SERVICE_FILE="/etc/systemd/system/snell.service"
