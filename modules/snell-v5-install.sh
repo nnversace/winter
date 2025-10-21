@@ -23,11 +23,17 @@ set -euo pipefail
 readonly DEFAULT_PSK="IUmuU/NjIQhHPMdBz5WONA=="
 readonly DEFAULT_PORT="53100"
 readonly DEFAULT_VERSION="5.0.1"
+readonly VERSION_FALLBACKS=("5.0.0")
 readonly INSTALL_PATH="/usr/local/bin"
 readonly CONFIG_DIR="/etc/snell"
 readonly SERVICE_FILE="/etc/systemd/system/snell.service"
 readonly DOWNLOAD_BASE_URL="https://dl.nssurge.com/snell"
 TMP_DIR=""
+EXTRACTED_BINARY=""
+DOWNLOADED_VERSION=""
+
+readonly DOWNLOAD_PREFIXES=("snell-server" "snell" "Snell-server" "Snell")
+readonly DOWNLOAD_EXTENSIONS=("zip" "tar.gz")
 
 log_info() {
     echo -e "\033[32m[INFO]\033[0m $1"
@@ -64,7 +70,7 @@ ensure_dependencies() {
     local missing=()
     local pkg
 
-    for pkg in curl unzip; do
+    for pkg in curl unzip tar; do
         if ! command -v "$pkg" &>/dev/null; then
             missing+=("$pkg")
         fi
@@ -120,35 +126,115 @@ detect_arch() {
     esac
 }
 
-download_snell() {
-    local version="$1"
-    local platform="$2"
-    local archive="snell-server-v${version}-${platform}.zip"
-    local url="$DOWNLOAD_BASE_URL/$archive"
+resolve_platform_candidates() {
+    local platform="$1"
+    case "$platform" in
+        linux-amd64)
+            echo "linux-amd64 linux-x86_64"
+            ;;
+        linux-aarch64)
+            echo "linux-aarch64 linux-arm64"
+            ;;
+        *)
+            echo "$platform"
+            ;;
+    esac
+}
 
-    TMP_DIR=$(mktemp -d /tmp/snell-install.XXXXXX)
-
-    log_info "正在下载 Snell v${version} ($platform)..."
-    if ! curl -fL --connect-timeout 15 --retry 3 -o "$TMP_DIR/$archive" "$url"; then
-        log_error "下载 Snell 安装包失败: $url"
-        exit 1
-    fi
+extract_archive() {
+    local archive_path="$1"
 
     log_info "正在解压安装包..."
-    if ! unzip -qo "$TMP_DIR/$archive" -d "$TMP_DIR"; then
-        log_error "解压 Snell 安装包失败。"
-        exit 1
-    fi
+    case "$archive_path" in
+        *.zip)
+            if ! unzip -qo "$archive_path" -d "$TMP_DIR"; then
+                log_error "解压 Snell 安装包失败 (${archive_path##*/})。"
+                exit 1
+            fi
+            ;;
+        *.tar.gz)
+            if ! tar -xzf "$archive_path" -C "$TMP_DIR"; then
+                log_error "解压 Snell 安装包失败 (${archive_path##*/})。"
+                exit 1
+            fi
+            ;;
+        *)
+            log_error "不支持的安装包格式: ${archive_path##*/}"
+            exit 1
+            ;;
+    esac
 
-    if [[ ! -f "$TMP_DIR/snell-server" ]]; then
+    local binary_path
+    binary_path=$(find "$TMP_DIR" -maxdepth 5 -type f -name "snell-server" -print -quit)
+    if [[ -z "$binary_path" ]]; then
         log_error "在安装包中未找到 snell-server 可执行文件。"
         exit 1
     fi
+
+    EXTRACTED_BINARY="$binary_path"
+}
+
+download_snell() {
+    local requested_version="$1"
+    local platform="$2"
+
+    TMP_DIR=$(mktemp -d /tmp/snell-install.XXXXXX)
+    DOWNLOADED_VERSION=""
+    EXTRACTED_BINARY=""
+
+    local -a versions_to_try=("$requested_version")
+    if [[ "$requested_version" == "$DEFAULT_VERSION" ]]; then
+        local fallback
+        for fallback in "${VERSION_FALLBACKS[@]}"; do
+            if [[ "$fallback" != "$requested_version" ]]; then
+                versions_to_try+=("$fallback")
+            fi
+        done
+    fi
+
+    IFS=' ' read -r -a platform_candidates <<< "$(resolve_platform_candidates "$platform")"
+
+    local version
+    for version in "${versions_to_try[@]}"; do
+        local platform_candidate
+        for platform_candidate in "${platform_candidates[@]}"; do
+            local prefix
+            for prefix in "${DOWNLOAD_PREFIXES[@]}"; do
+                local ext
+                for ext in "${DOWNLOAD_EXTENSIONS[@]}"; do
+                    local archive="${prefix}-v${version}-${platform_candidate}.${ext}"
+                    local url="$DOWNLOAD_BASE_URL/$archive"
+                    log_info "尝试下载 Snell v${version} (${platform_candidate}) -> ${archive}"
+                    if curl -fL --connect-timeout 15 --retry 3 --silent --show-error -o "$TMP_DIR/$archive" "$url"; then
+                        if [[ "$version" != "$requested_version" ]]; then
+                            log_warn "指定版本 ${requested_version} 未能下载，已回退到 ${version}。"
+                        fi
+                        log_info "下载完成: ${archive}"
+                        extract_archive "$TMP_DIR/$archive"
+                        DOWNLOADED_VERSION="$version"
+                        return
+                    else
+                        local status=$?
+                        log_warn "下载失败 (URL: $url, curl 退出码: $status)"
+                        rm -f "$TMP_DIR/$archive"
+                    fi
+                done
+            done
+        done
+    done
+
+    log_error "无法下载 Snell 安装包，请检查版本和架构是否正确。"
+    exit 1
 }
 
 install_binary() {
+    if [[ -z "$EXTRACTED_BINARY" || ! -f "$EXTRACTED_BINARY" ]]; then
+        log_error "未找到解压后的 snell-server 二进制文件。"
+        exit 1
+    fi
+
     log_info "正在安装 snell-server 到 $INSTALL_PATH"
-    install -m 755 "$TMP_DIR/snell-server" "$INSTALL_PATH/snell-server"
+    install -m 755 "$EXTRACTED_BINARY" "$INSTALL_PATH/snell-server"
 }
 
 write_config() {
@@ -235,10 +321,12 @@ main() {
     platform=$(detect_arch)
 
     download_snell "$version" "$platform"
+    local actual_version="${DOWNLOADED_VERSION:-$version}"
+
     install_binary
     write_config "$psk" "$port"
     setup_service
-    print_summary "$version" "$psk" "$port"
+    print_summary "$actual_version" "$psk" "$port"
 }
 
 main "$@"
