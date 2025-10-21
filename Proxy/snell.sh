@@ -1,177 +1,244 @@
 #!/bin/bash
 
+#================================================================================
+# Snell v5 一键安装脚本 (默认适用于 Debian/Ubuntu 系列)
+#
+# 功能概述:
+#   - 自动检测系统架构并下载对应的 Snell v5 二进制文件
+#   - 支持通过环境变量自定义 PSK、端口和 Snell 版本
+#   - 自动创建配置文件与 systemd 服务，实现开机自启
+#   - 提供详尽的日志输出，出现错误时自动清理临时文件
+#
+# 默认参数(可通过环境变量覆盖):
+#   PSK  : IUmuU/NjIQhHPMdBz5WONA==
+#   PORT : 53100
+#   SNELL_VERSION : 5.0.1
+#
+# 使用示例:
+#   sudo PSK="your_psk" PORT=12345 ./snell-v5-install.sh
+#================================================================================
+
 set -euo pipefail
 
-SNELL_VERSION="v5.0.0"
-INSTALL_DIR="/usr/local/bin"
-SERVICE_NAME="snell"
-CONFIG_DIR="/etc/snell"
-CONFIG_PATH="${CONFIG_DIR}/snell-server.conf"
-SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
-SNELL_PORT=53100
-SNELL_PSK="IUmuU/NjIQhHPMdBz5WONA=="
+readonly DEFAULT_PSK="IUmuU/NjIQhHPMdBz5WONA=="
+readonly DEFAULT_PORT="53100"
+readonly DEFAULT_VERSION="5.0.1"
+readonly INSTALL_PATH="/usr/local/bin"
+readonly CONFIG_DIR="/etc/snell"
+readonly SERVICE_FILE="/etc/systemd/system/snell.service"
+readonly DOWNLOAD_BASE_URL="https://dl.nssurge.com/snell"
+TMP_DIR=""
 
 log_info() {
-  printf '\033[32m[INFO]\033[0m %s\n' "$*"
+    echo -e "\033[32m[INFO]\033[0m $1"
 }
 
 log_warn() {
-  printf '\033[33m[WARN]\033[0m %s\n' "$*"
+    echo -e "\033[33m[WARN]\033[0m $1"
 }
 
 log_error() {
-  printf '\033[31m[ERROR]\033[0m %s\n' "$*" >&2
+    echo -e "\033[31m[ERROR]\033[0m $1" >&2
 }
 
-ensure_root() {
-  if [[ "$(id -u)" -ne 0 ]]; then
-    log_error "此脚本必须以 root 权限运行"
-    exit 1
-  fi
+cleanup() {
+    local exit_code=$?
+    if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
+        rm -rf "$TMP_DIR"
+    fi
+    if (( exit_code != 0 )); then
+        log_error "脚本执行失败，退出码: $exit_code"
+    fi
+    exit $exit_code
+}
+trap cleanup EXIT INT TERM
+
+require_root() {
+    if [[ "$EUID" -ne 0 ]]; then
+        log_error "请使用 root 权限运行本脚本。"
+        exit 1
+    fi
 }
 
-ensure_command() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    log_error "未找到依赖命令: $1"
-    exit 1
-  fi
-}
+ensure_dependencies() {
+    local missing=()
+    local pkg
 
-detect_arch() {
-  local arch
-  arch=$(uname -m)
-  case "$arch" in
-    x86_64)
-      echo "amd64"
-      ;;
-    i386|i686)
-      echo "i386"
-      ;;
-    aarch64)
-      echo "aarch64"
-      ;;
-    armv7l)
-      echo "armv7l"
-      ;;
-    *)
-      log_error "不支持的架构: $arch"
-      exit 1
-      ;;
-  esac
+    for pkg in curl unzip; do
+        if ! command -v "$pkg" &>/dev/null; then
+            missing+=("$pkg")
+        fi
+    done
+
+    if (( ${#missing[@]} == 0 )); then
+        return
+    fi
+
+    if command -v apt-get &>/dev/null; then
+        log_info "正在安装依赖: ${missing[*]}"
+        apt-get update -y
+        apt-get install -y "${missing[@]}"
+    else
+        log_warn "检测到缺少依赖: ${missing[*]}。请手动安装后重试。"
+        exit 1
+    fi
 }
 
 validate_port() {
-  local port="$1"
-  if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-    log_error "无效的端口号: $port"
-    exit 1
-  fi
+    local port="$1"
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        log_error "无效的端口号: $port (需为 1-65535 间的整数)"
+        exit 1
+    fi
+}
+
+validate_psk() {
+    local psk="$1"
+    if [[ -z "$psk" ]]; then
+        log_error "PSK 不能为空。"
+        exit 1
+    fi
+}
+
+detect_arch() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64)
+            echo "linux-amd64"
+            ;;
+        aarch64|arm64)
+            echo "linux-aarch64"
+            ;;
+        armv7l|armv7)
+            echo "linux-armv7l"
+            ;;
+        *)
+            log_error "当前架构($arch)暂不受支持。"
+            exit 1
+            ;;
+    esac
+}
+
+download_snell() {
+    local version="$1"
+    local platform="$2"
+    local archive="snell-server-v${version}-${platform}.zip"
+    local url="$DOWNLOAD_BASE_URL/$archive"
+
+    TMP_DIR=$(mktemp -d /tmp/snell-install.XXXXXX)
+
+    log_info "正在下载 Snell v${version} ($platform)..."
+    if ! curl -fL --connect-timeout 15 --retry 3 -o "$TMP_DIR/$archive" "$url"; then
+        log_error "下载 Snell 安装包失败: $url"
+        exit 1
+    fi
+
+    log_info "正在解压安装包..."
+    if ! unzip -qo "$TMP_DIR/$archive" -d "$TMP_DIR"; then
+        log_error "解压 Snell 安装包失败。"
+        exit 1
+    fi
+
+    if [[ ! -f "$TMP_DIR/snell-server" ]]; then
+        log_error "在安装包中未找到 snell-server 可执行文件。"
+        exit 1
+    fi
+}
+
+install_binary() {
+    log_info "正在安装 snell-server 到 $INSTALL_PATH"
+    install -m 755 "$TMP_DIR/snell-server" "$INSTALL_PATH/snell-server"
 }
 
 write_config() {
-  local port="$1" psk="$2"
+    local psk="$1"
+    local port="$2"
 
-  install -d -m 755 "$CONFIG_DIR"
-
-  if [[ -f "$CONFIG_PATH" ]]; then
-    local backup="${CONFIG_PATH}.$(date +%Y%m%d%H%M%S).bak"
-    cp "$CONFIG_PATH" "$backup"
-    log_info "已备份现有配置到 $backup"
-  fi
-
-  cat >"$CONFIG_PATH" <<EOF
+    log_info "正在写入配置文件: $CONFIG_DIR/snell-server.conf"
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_DIR/snell-server.conf" <<CONFIG
 [snell-server]
 listen = 0.0.0.0:${port}
 psk = ${psk}
-EOF
-
-  chmod 600 "$CONFIG_PATH"
+CONFIG
+    chmod 600 "$CONFIG_DIR/snell-server.conf"
 }
 
-write_service() {
-  cat >"$SERVICE_PATH" <<EOF
+setup_service() {
+    log_info "正在创建 systemd 服务文件: $SERVICE_FILE"
+    cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
-Description=Snell Proxy Service
+Description=Snell v5 Server
 After=network.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=nobody
-Group=nogroup
-ExecStart=${INSTALL_DIR}/snell-server -c ${CONFIG_PATH}
+ExecStart=${INSTALL_PATH}/snell-server -c ${CONFIG_DIR}/snell-server.conf
 Restart=on-failure
 RestartSec=5
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
-EOF
-}
+SERVICE
+    chmod 644 "$SERVICE_FILE"
 
-install_snell() {
-  local arch="$1"
-  local temp_dir=""
-  temp_dir=$(mktemp -d)
-  trap '[[ -n "${temp_dir:-}" ]] && rm -rf "${temp_dir:-}"' EXIT
-
-  local url="https://dl.nssurge.com/snell/snell-server-${SNELL_VERSION}-linux-${arch}.zip"
-  log_info "正在下载 Snell ${SNELL_VERSION} (${arch})..."
-  wget -qO "${temp_dir}/snell.zip" "$url" || {
-    log_error "下载失败，请检查网络或下载地址: $url"
-    exit 1
-  }
-
-  log_info "正在解压 Snell..."
-  unzip -oq "${temp_dir}/snell.zip" -d "$temp_dir"
-
-  install -m 755 "${temp_dir}/snell-server" "${INSTALL_DIR}/snell-server"
-  log_info "Snell 已安装到 ${INSTALL_DIR}/snell-server"
-
-  rm -rf "$temp_dir"
-  trap - EXIT
-}
-
-configure_systemd() {
-  log_info "正在写入 systemd 服务配置..."
-  write_service
-  systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+    if command -v systemctl &>/dev/null; then
+        systemctl daemon-reload
+        systemctl enable snell.service >/dev/null 2>&1 || true
+        if ! systemctl restart snell.service; then
+            log_warn "snell.service 重启失败，请检查 systemd 日志。"
+        fi
+    else
+        log_warn "未检测到 systemctl，请手动管理 Snell 服务。"
+    fi
 }
 
 print_summary() {
-  local port="$1" psk="$2"
-  echo "Snell ${SNELL_VERSION} 安装完成!"
-  echo "------------------------------"
-  echo "服务器地址: $(hostname -I | awk '{print $1}')"
-  echo "端口: ${port}"
-  echo "PSK: ${psk}"
-  echo "配置文件: ${CONFIG_PATH}"
-  echo "服务: systemctl status ${SERVICE_NAME}"
-  echo "------------------------------"
+    local version="$1"
+    local psk="$2"
+    local port="$3"
+
+    cat <<SUMMARY
+====================================================================
+Snell v${version} 安装完成！
+配置摘要:
+  - 监听端口 : ${port}
+  - 预共享密钥: ${psk}
+  - 配置文件 : ${CONFIG_DIR}/snell-server.conf
+  - 可执行文件: ${INSTALL_PATH}/snell-server
+  - 服务名称 : snell.service
+
+管理命令:
+  systemctl status snell
+  systemctl restart snell
+  systemctl stop snell
+  journalctl -u snell -f
+====================================================================
+SUMMARY
 }
 
 main() {
-  ensure_root
-  ensure_command wget
-  ensure_command unzip
-  ensure_command systemctl
+    require_root
+    ensure_dependencies
 
-  local arch port psk
-  arch=$(detect_arch)
+    local psk="${PSK:-$DEFAULT_PSK}"
+    local port="${PORT:-$DEFAULT_PORT}"
+    local version="${SNELL_VERSION:-$DEFAULT_VERSION}"
 
-  port="$SNELL_PORT"
-  validate_port "$port"
+    validate_psk "$psk"
+    validate_port "$port"
 
-  psk="$SNELL_PSK"
+    local platform
+    platform=$(detect_arch)
 
-  if systemctl is-active --quiet "$SERVICE_NAME"; then
-    log_info "检测到已运行的 Snell 服务，正在停止..."
-    systemctl stop "$SERVICE_NAME"
-  fi
-
-  install_snell "$arch"
-  write_config "$port" "$psk"
-  configure_systemd
-  print_summary "$port" "$psk"
+    download_snell "$version" "$platform"
+    install_binary
+    write_config "$psk" "$port"
+    setup_service
+    print_summary "$version" "$psk" "$port"
 }
 
 main "$@"
