@@ -9,6 +9,13 @@ readonly CUSTOM_ZRAM_SCRIPT="/usr/local/sbin/custom-zram-setup.sh"
 readonly SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/zramswap.service.d"
 readonly SYSTEMD_OVERRIDE_FILE="${SYSTEMD_OVERRIDE_DIR}/override.conf"
 readonly DEFAULT_TIMEZONE="Asia/Shanghai"
+readonly SUPPORTED_DEBIAN_MAJOR_VERSIONS=("12" "13")
+readonly SUPPORTED_DEBIAN_CODENAMES=("bookworm" "trixie")
+
+APT_UPDATED=0
+DEBIAN_MAJOR_VERSION=""
+DEBIAN_CODENAME=""
+DEBIAN_ID=""
 
 # === 日志函数 ===
 log() {
@@ -19,6 +26,100 @@ log() {
 
 debug_log() {
     [[ "${DEBUG:-}" == "1" ]] && log "DEBUG: $1" "debug" >&2
+}
+
+# === 环境检测与包管理工具 ===
+detect_debian_release() {
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        DEBIAN_ID="${ID:-}"
+        DEBIAN_CODENAME="${VERSION_CODENAME:-${DEBIAN_CODENAME:-}}"
+        DEBIAN_MAJOR_VERSION="${VERSION_ID%%.*}"
+    fi
+
+    local id_like="${ID_LIKE:-}"
+    if [[ "${DEBIAN_ID}" != "debian" && "${id_like}" != *debian* ]]; then
+        log "检测到的系统并非Debian系，脚本仅在Debian 12/13上经过验证" "warn"
+    fi
+
+    if [[ -n "${DEBIAN_MAJOR_VERSION}" && ! "${DEBIAN_MAJOR_VERSION}" =~ ^[0-9]+$ ]]; then
+        DEBIAN_MAJOR_VERSION=""
+    fi
+
+    if [[ -z "${DEBIAN_MAJOR_VERSION}" && -n "${DEBIAN_CODENAME}" ]]; then
+        case "${DEBIAN_CODENAME}" in
+            bookworm) DEBIAN_MAJOR_VERSION="12" ;;
+            trixie)   DEBIAN_MAJOR_VERSION="13" ;;
+        esac
+    fi
+
+    local supported=0
+
+    if [[ -n "${DEBIAN_MAJOR_VERSION}" ]]; then
+        local version
+        for version in "${SUPPORTED_DEBIAN_MAJOR_VERSIONS[@]}"; do
+            if [[ "${DEBIAN_MAJOR_VERSION}" == "$version" ]]; then
+                supported=1
+                break
+            fi
+        done
+    fi
+
+    if (( !supported )) && [[ -n "${DEBIAN_CODENAME}" ]]; then
+        local codename
+        for codename in "${SUPPORTED_DEBIAN_CODENAMES[@]}"; do
+            if [[ "${DEBIAN_CODENAME}" == "$codename" ]]; then
+                supported=1
+                break
+            fi
+        done
+    fi
+
+    if (( supported )); then
+        log "检测到Debian ${DEBIAN_MAJOR_VERSION:-unknown}${DEBIAN_CODENAME:+ (${DEBIAN_CODENAME})}" "info"
+    else
+        log "当前系统版本 ${DEBIAN_MAJOR_VERSION:-unknown}${DEBIAN_CODENAME:+ (${DEBIAN_CODENAME})} 未在支持列表内 (${SUPPORTED_DEBIAN_MAJOR_VERSIONS[*]})." "warn"
+    fi
+}
+
+ensure_apt_updated() {
+    if (( APT_UPDATED )); then
+        return 0
+    fi
+
+    log "刷新APT软件包索引..." "info"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+        log "APT源更新失败，请检查网络或软件源配置。" "error"
+        return 1
+    fi
+    APT_UPDATED=1
+}
+
+ensure_packages() {
+    local pkg
+    local -a missing=()
+
+    for pkg in "$@"; do
+        dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+    done
+
+    (( ${#missing[@]} )) || return 0
+
+    ensure_apt_updated || return 1
+
+    log "安装缺失的依赖: ${missing[*]}" "info"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" >/dev/null 2>&1; then
+        log "安装依赖失败: ${missing[*]}" "error"
+        return 1
+    fi
+}
+
+restore_timesyncd() {
+    log "回退启用 systemd-timesyncd 服务" "warn"
+    systemctl unmask systemd-timesyncd.service >/dev/null 2>&1 || true
+    systemctl enable systemd-timesyncd.service >/dev/null 2>&1 || true
+    systemctl start systemd-timesyncd.service >/dev/null 2>&1 || true
 }
 
 # === 辅助函数 ===
@@ -292,11 +393,7 @@ setup_zram() {
     local multiplier=$(echo "$config" | cut -d, -f3)
     
     local target_size_mb
-    if command -v bc >/dev/null 2>&1; then
-        target_size_mb=$(awk "BEGIN {printf \"%.0f\", $mem_mb * $multiplier}")
-    else
-        target_size_mb=$(( mem_mb * ${multiplier/./} / ${multiplier/.*} ))
-    fi
+    target_size_mb=$(awk -v mem="$mem_mb" -v mult="$multiplier" 'BEGIN {printf "%.0f", mem * mult}')
     
     local device_count=1
     [[ "$device_type" == "multi" ]] && device_count=$((cores > 4 ? 4 : cores))
@@ -330,12 +427,9 @@ setup_zram() {
     cleanup_zram_completely
 
     # 安装zram-tools以获取基础服务文件
-    if ! dpkg -l zram-tools &>/dev/null; then
-        log "安装zram-tools以提供服务框架..." "info"
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y zram-tools >/dev/null 2>&1 || {
-            log "zram-tools安装失败" "error"; return 1;
-        }
+    if ! ensure_packages zram-tools; then
+        log "zram-tools 安装失败，无法继续自动配置" "error"
+        return 1
     fi
     
     # 设置内核参数并获取优先级
@@ -377,15 +471,28 @@ setup_timezone() {
 
     if [[ "$current_tz" == "$target_tz" ]]; then
         echo "时区: $current_tz (已是目标时区，无需更改)"
-    else
-        log "时区: 正在自动设置为 $target_tz..." "info"
-        if timedatectl set-timezone "$target_tz" 2>/dev/null; then
-            echo "时区: $target_tz (设置成功)"
-        else
-            log "设置时区失败" "error"
-            return 1
-        fi
+        return 0
     fi
+
+    log "时区: 正在自动设置为 $target_tz..." "info"
+    if timedatectl set-timezone "$target_tz" 2>/dev/null; then
+        echo "时区: $target_tz (设置成功)"
+        return 0
+    fi
+
+    log "timedatectl 设置失败，尝试使用传统方式更新时区" "warn"
+    local zoneinfo_path="/usr/share/zoneinfo/${target_tz}"
+    if [[ ! -f "$zoneinfo_path" ]]; then
+        log "未找到时区文件: $zoneinfo_path" "error"
+        return 1
+    fi
+
+    ln -sf "$zoneinfo_path" /etc/localtime
+    echo "$target_tz" > /etc/timezone
+    if command -v dpkg-reconfigure >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive dpkg-reconfigure tzdata >/dev/null 2>&1 || true
+    fi
+    echo "时区: $target_tz (通过备用方式设置成功)"
 }
 
 # 配置Chrony
@@ -396,31 +503,56 @@ setup_chrony() {
         fi
     fi
     
-    systemctl stop systemd-timesyncd 2>/dev/null || true
-    systemctl disable systemd-timesyncd 2>/dev/null || true
-    
-    if ! command -v chronyd &>/dev/null; then
-        apt-get install -y chrony >/dev/null 2>&1 || {
-            log "Chrony安装失败" "error"; return 1;
-        }
+    for svc in systemd-timesyncd.service systemd-timesyncd; do
+        systemctl stop "$svc" >/dev/null 2>&1 || true
+        systemctl disable "$svc" >/dev/null 2>&1 || true
+    done
+
+    if ! ensure_packages chrony; then
+        log "Chrony 安装失败" "error"
+        restore_timesyncd
+        return 1
     fi
-    
-    systemctl enable chrony >/dev/null 2>&1
-    systemctl restart chrony >/dev/null 2>&1
-    
-    sleep 2
-    if systemctl is-active chrony &>/dev/null; then
-        local sources_count=$(chronyc sources 2>/dev/null | grep -c "^\^" || echo "0")
-        echo "时间同步: Chrony (${sources_count}个时间源)"
-    else
-        log "Chrony启动失败" "error"; return 1;
+
+    systemctl enable chrony.service >/dev/null 2>&1 || true
+    if ! systemctl restart chrony.service >/dev/null 2>&1; then
+        log "重启 Chrony 服务失败" "error"
+        restore_timesyncd
+        return 1
     fi
+
+    # 等待 chrony 建立同步关系，最大等待约10秒
+    local attempt=0
+    while (( attempt < 5 )); do
+        if systemctl is-active chrony.service >/dev/null 2>&1; then
+            if ! command -v chronyc >/dev/null 2>&1 || chronyc tracking >/dev/null 2>&1; then
+                break
+            fi
+        fi
+        sleep 2
+        ((attempt++))
+    done
+
+    if ! systemctl is-active chrony.service >/dev/null 2>&1; then
+        log "Chrony启动失败，回退到 systemd-timesyncd" "error"
+        restore_timesyncd
+        return 1
+    fi
+
+    local sources_count=0
+    if command -v chronyc >/dev/null 2>&1; then
+        sources_count=$(chronyc sources 2>/dev/null | grep -c "^\^" || echo "0")
+        chronyc makestep >/dev/null 2>&1 || true
+    fi
+    echo "时间同步: Chrony (${sources_count}个时间源)"
 }
 
 # === 主流程 ===
 main() {
     [[ $EUID -eq 0 ]] || { log "需要root权限运行" "error"; exit 1; }
-    
+
+    detect_debian_release
+
     local wait_count=0
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
         ((wait_count++))
@@ -438,8 +570,9 @@ main() {
     done
     
     if ! command -v bc &>/dev/null; then
-        log "安装必需的依赖: bc" "info"
-        apt-get install -y bc >/dev/null 2>&1 || log "bc安装失败，将使用备用计算方法" "warn"
+        if ! ensure_packages bc; then
+            log "bc安装失败，将使用备用计算方法" "warn"
+        fi
     fi
     
     export SYSTEMD_PAGER="" PAGER=""

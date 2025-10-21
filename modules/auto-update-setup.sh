@@ -1,265 +1,294 @@
 #!/bin/bash
-#
-# Debian 13 系统自动更新配置脚本
-# 功能: 创建更新脚本并配置 Cron 定时任务，实现系统无人值守更新。
-#
+# 自动化系统更新配置脚本 (优化版，适配 Debian 12/13)
+# 功能: 创建无人值守的系统更新脚本并配置 Cron 任务
 
-# --- 环境设置 ---
-# -e: 命令失败时立即退出
-# -u: 变量未定义时报错
-# -o pipefail: 管道中任一命令失败则整个管道失败
 set -euo pipefail
+umask 022
 
-# --- 全局常量 ---
 readonly UPDATE_SCRIPT_PATH="/usr/local/sbin/system-auto-update.sh"
 readonly LOG_FILE="/var/log/system-auto-update.log"
-readonly DEFAULT_CRON_SCHEDULE="0 2 * * 0" # 默认时间：每周日凌晨2点
-readonly CRON_JOB_COMMENT="# 由此脚本管理的系统自动更新任务"
+readonly DEFAULT_CRON_SCHEDULE="0 2 * * 0"
+readonly CRON_JOB_COMMENT="# winter auto-update"
+readonly SUPPORTED_DEBIAN_MAJOR_VERSIONS=("12" "13")
+readonly SUPPORTED_DEBIAN_CODENAMES=("bookworm" "trixie")
+readonly CRON_SERVICE_NAME="cron"
 
-# --- 日志与消息输出 ---
-# 带有颜色标记的日志函数
-# 使用: log "消息" "类型"
-# 类型: info(蓝), warn(黄), error(红), success(绿)
+APT_UPDATED=0
+DEBIAN_ID=""
+DEBIAN_MAJOR_VERSION=""
+DEBIAN_CODENAME=""
+
 log() {
-    local msg="$1"
-    local level="${2:-info}"
-    local color_code
-
+    local msg="$1" level="${2:-info}"
+    local color
     case "$level" in
-        info) color_code="\033[0;36m" ;;  # 青色
-        warn) color_code="\033[0;33m" ;;  # 黄色
-        error) color_code="\033[0;31m" ;; # 红色
-        success) color_code="\033[0;32m" ;; # 绿色
-        *) color_code="\033[0m" ;;
+        info)    color="\033[0;36m" ;;
+        warn)    color="\033[0;33m" ;;
+        error)   color="\033[0;31m" ;;
+        success) color="\033[0;32m" ;;
+        *)       color="\033[0m" ;;
     esac
-
-    # >&2 表示输出到标准错误，避免干扰脚本的正常输出（例如函数返回值）
-    echo -e "${color_code}[$(date '+%T')] ${msg}\033[0m" >&2
+    echo -e "${color}[$(date '+%H:%M:%S')] $msg\033[0m" >&2
 }
 
-# --- 核心功能函数 ---
-
-# 1. 检查并确保以 root 用户身份运行
-ensure_root_privileges() {
-    if [[ "$(id -u)" -ne 0 ]]; then
-        log "错误：此脚本需要以 root 权限运行。" "error"
-        log "请尝试使用 'sudo bash $0' 或切换到 root 用户。" "info"
+ensure_root() {
+    if (( EUID != 0 )); then
+        log "此脚本需要 root 权限运行，请使用 sudo 或切换至 root。" "error"
         exit 1
     fi
 }
 
-# 2. 检查并安装 Cron 服务
-ensure_cron_service() {
-    log "检查 Cron 服务状态..." "info"
-    if ! command -v crontab &>/dev/null; then
-        log "未检测到 cron，正在尝试安装..." "warn"
-        if apt-get update -qq && apt-get install -y cron -qq; then
-            log "Cron 安装成功。" "success"
-        else
-            log "Cron 安装失败，请手动安装后再运行此脚本。" "error"
-            return 1
-        fi
+detect_debian_release() {
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        DEBIAN_ID="${ID:-}"
+        DEBIAN_CODENAME="${VERSION_CODENAME:-}"
+        DEBIAN_MAJOR_VERSION="${VERSION_ID%%.*}"
     fi
 
-    if ! systemctl is-active --quiet cron; then
-        log "Cron 服务未运行，正在启动并设置为开机自启..." "warn"
-        systemctl start cron
-        systemctl enable cron
+    local id_like="${ID_LIKE:-}"
+    if [[ "${DEBIAN_ID}" != "debian" && "${id_like}" != *debian* ]]; then
+        log "检测到的系统并非 Debian 系，脚本仅在 Debian 12/13 上验证。" "warn"
     fi
 
-    if systemctl is-active --quiet cron; then
-        log "Cron 服务运行正常。" "success"
+    if [[ -z "$DEBIAN_MAJOR_VERSION" && -n "$DEBIAN_CODENAME" ]]; then
+        case "$DEBIAN_CODENAME" in
+            bookworm) DEBIAN_MAJOR_VERSION="12" ;;
+            trixie)   DEBIAN_MAJOR_VERSION="13" ;;
+        esac
+    fi
+
+    local supported=0 version codename
+    if [[ -n "$DEBIAN_MAJOR_VERSION" ]]; then
+        for version in "${SUPPORTED_DEBIAN_MAJOR_VERSIONS[@]}"; do
+            if [[ "$version" == "$DEBIAN_MAJOR_VERSION" ]]; then
+                supported=1
+                break
+            fi
+        done
+    fi
+
+    if (( !supported )) && [[ -n "$DEBIAN_CODENAME" ]]; then
+        for codename in "${SUPPORTED_DEBIAN_CODENAMES[@]}"; do
+            if [[ "$codename" == "$DEBIAN_CODENAME" ]]; then
+                supported=1
+                break
+            fi
+        done
+    fi
+
+    if (( supported )); then
+        log "检测到 Debian ${DEBIAN_MAJOR_VERSION:-unknown}${DEBIAN_CODENAME:+ (${DEBIAN_CODENAME})}。" "info"
     else
-        log "无法启动 Cron 服务，请检查系统日志。" "error"
+        log "当前系统版本 ${DEBIAN_MAJOR_VERSION:-unknown}${DEBIAN_CODENAME:+ (${DEBIAN_CODENAME})} 未列入官方支持范围。" "warn"
+    fi
+}
+
+ensure_systemd() {
+    if [[ ! -d /run/systemd/system ]]; then
+        log "未检测到 systemd 运行环境，无法管理 Cron 服务。" "error"
+        exit 1
+    fi
+}
+
+ensure_apt_updated() {
+    if (( APT_UPDATED )); then
+        return 0
+    fi
+    log "刷新 APT 软件源索引..."
+    if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+        log "APT 更新失败，请检查网络或软件源配置。" "error"
+        return 1
+    fi
+    APT_UPDATED=1
+}
+
+ensure_packages() {
+    local pkg missing=()
+    for pkg in "$@"; do
+        dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+    done
+
+    (( ${#missing[@]} )) || return 0
+
+    ensure_apt_updated || return 1
+    log "安装缺失的依赖: ${missing[*]}"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" >/dev/null; then
+        log "安装依赖失败: ${missing[*]}" "error"
         return 1
     fi
 }
 
-# 3. 创建核心的自动更新脚本
-create_update_script() {
-    log "创建系统更新脚本..." "info"
-    # 使用 cat 和 HEREDOC 创建脚本文件
-    if ! cat > "$UPDATE_SCRIPT_PATH" << 'EOF'; then
-#!/bin/bash
-#
-# 系统自动更新执行脚本
-# 由主配置脚本生成，请勿直接修改。
-#
+ensure_cron_service() {
+    log "检查 Cron 服务..."
+    ensure_packages cron || return 1
 
+    if ! systemctl is-enabled --quiet "$CRON_SERVICE_NAME" 2>/dev/null; then
+        log "启用 Cron 服务并设置开机自启。" "info"
+        systemctl enable "$CRON_SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+
+    if ! systemctl is-active --quiet "$CRON_SERVICE_NAME"; then
+        log "启动 Cron 服务..." "warn"
+        systemctl start "$CRON_SERVICE_NAME"
+    fi
+
+    if systemctl is-active --quiet "$CRON_SERVICE_NAME"; then
+        log "Cron 服务运行正常。" "success"
+    else
+        log "Cron 服务无法启动，请检查 systemctl 状态。" "error"
+        return 1
+    fi
+}
+
+create_update_script() {
+    log "创建系统自动更新执行脚本..."
+    install -d -m 755 "$(dirname "$UPDATE_SCRIPT_PATH")"
+    install -d -m 755 "$(dirname "$LOG_FILE")"
+
+    cat > "$UPDATE_SCRIPT_PATH" <<'EOS'
+#!/bin/bash
 set -euo pipefail
 
 readonly LOG_FILE="/var/log/system-auto-update.log"
-# 非交互式更新，优先使用默认配置处理 dpkg 冲突
 readonly APT_OPTIONS="-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
 
-# 记录日志到文件
 log_to_file() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-# 检查内核是否更新，如有更新则准备重启
 handle_kernel_update_and_reboot() {
-    local current_kernel
+    local current_kernel latest_kernel
     current_kernel=$(uname -r)
-    # 查找 /boot 目录下最新的内核版本
-    local latest_kernel
-    latest_kernel=$(find /boot -name "vmlinuz-*" -printf "%f\n" 2>/dev/null | sed 's/vmlinuz-//' | sort -V | tail -1)
+    latest_kernel=$(find /boot -name "vmlinuz-*" -printf "%f\n" 2>/dev/null | sed 's/^vmlinuz-//' | sort -V | tail -n1)
 
-    if [[ -n "$latest_kernel" && "$current_kernel" != "$latest_kernel" ]]; then
+    if [[ -n "$latest_kernel" && "$latest_kernel" != "$current_kernel" ]]; then
         log_to_file "检测到新内核版本 ($latest_kernel)，系统将在1分钟后重启以应用更新。"
-        sync # 同步磁盘缓存
+        sync
         sleep 60
-        # 优先使用 systemctl，如果失败则使用 reboot
         systemctl reboot || reboot
     fi
 }
 
-# --- 更新主流程 ---
 log_to_file "======== 开始系统自动更新 ========"
+log_to_file "更新软件包列表 (apt-get update)..."
+DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"$LOG_FILE" 2>&1
 
-# 1. 更新软件包列表
-log_to_file "正在更新软件包列表 (apt update)..."
-apt-get update -qq >> "$LOG_FILE" 2>&1
+log_to_file "执行系统升级 (apt-get dist-upgrade)..."
+DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade $APT_OPTIONS >>"$LOG_FILE" 2>&1
 
-# 2. 执行系统升级
-log_to_file "正在执行系统升级 (apt dist-upgrade)..."
-DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade $APT_OPTIONS >> "$LOG_FILE" 2>&1
-
-# 3. 检查内核更新并处理重启
 handle_kernel_update_and_reboot
 
-# 4. 清理不再需要的软件包和缓存
-log_to_file "正在清理无用软件包 (apt autoremove)..."
-apt-get autoremove -y -qq >> "$LOG_FILE" 2>&1
+log_to_file "清理无用的软件包 (apt-get autoremove)..."
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >>"$LOG_FILE" 2>&1
 
-log_to_file "正在清理旧的软件包缓存 (apt autoclean)..."
-apt-get autoclean -qq >> "$LOG_FILE" 2>&1
+log_to_file "清理旧的软件包缓存 (apt-get autoclean)..."
+DEBIAN_FRONTEND=noninteractive apt-get autoclean -qq >>"$LOG_FILE" 2>&1
 
 log_to_file "======== 系统自动更新完成 ========"
-exit 0
-EOF
-        log "创建更新脚本失败。" "error"
-        return 1
-    fi
+EOS
 
-    # 赋予脚本执行权限
-    chmod +x "$UPDATE_SCRIPT_PATH"
-    log "更新脚本已创建于: $UPDATE_SCRIPT_PATH" "success"
+    chmod 755 "$UPDATE_SCRIPT_PATH"
+    log "更新脚本已写入 $UPDATE_SCRIPT_PATH" "success"
 }
 
-# 4. 配置 Cron 定时任务
-setup_cron_job() {
-    log "配置 Cron 定时任务..." "info"
-    local cron_schedule
-
-    # 检查是否已存在任务
-    if crontab -l 2>/dev/null | grep -q "$UPDATE_SCRIPT_PATH"; then
-        local overwrite
-        read -p "检测到已存在的更新任务，是否要覆盖？[y/N]: " -r overwrite
-        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-            log "操作已取消，保留现有任务。" "warn"
-            return
-        fi
-    fi
-
-    local use_default
-    read -p "是否使用默认更新时间 (每周日凌晨2点)？[Y/n]: " -r use_default
+prompt_cron_schedule() {
+    local use_default custom_schedule cron_schedule
+    read -p "是否使用默认更新时间 (每周日凌晨2点)? [Y/n]: " -r use_default
     if [[ "$use_default" =~ ^[Nn]$ ]]; then
-        log "请输入自定义 Cron 表达式 (格式: 分 时 日 月 周)，例如 '0 3 * * 1' 表示每周一凌晨3点。" "info"
+        log "请输入自定义 Cron 表达式 (分 时 日 月 周)。" "info"
         while true; do
             read -p "请输入: " -r custom_schedule
-            # 简单的格式验证
-            if [[ "$custom_schedule" =~ ^[0-9*,/-]+[[:space:]]+[0-9*,/-]+[[:space:]]+[0-9*,/-]+[[:space:]]+[0-9*,/-]+[[:space:]]+[0-9*,/-]+$ ]]; then
+            if [[ "$custom_schedule" =~ ^[0-9*,/-]+[[:space:]][0-9*,/-]+[[:space:]][0-9*,/-]+[[:space:]][0-9*,/-]+[[:space:]][0-9*,/-]+$ ]]; then
                 cron_schedule="$custom_schedule"
-                log "自定义时间已设置为: $cron_schedule" "success"
                 break
-            else
-                log "格式无效，请重新输入。" "error"
             fi
+            log "Cron 表达式格式无效，请重新输入。" "error"
         done
     else
         cron_schedule="$DEFAULT_CRON_SCHEDULE"
-        log "使用默认更新时间。" "info"
     fi
-
-    # 使用临时文件来安全地更新 crontab
-    local temp_cron_file
-    temp_cron_file=$(mktemp)
-    # 导出当前 crontab，并过滤掉旧的任务
-    crontab -l 2>/dev/null | grep -v "$UPDATE_SCRIPT_PATH" | grep -v "$CRON_JOB_COMMENT" > "$temp_cron_file" || true
-    # 添加新的任务
-    echo "$CRON_JOB_COMMENT" >> "$temp_cron_file"
-    echo "$cron_schedule $UPDATE_SCRIPT_PATH" >> "$temp_cron_file"
-
-    # 导入新的 crontab 配置
-    if crontab "$temp_cron_file"; then
-        log "定时任务配置成功。" "success"
-    else
-        log "定时任务配置失败。" "error"
-        rm -f "$temp_cron_file"
-        return 1
-    fi
-    rm -f "$temp_cron_file"
+    printf '%s' "$cron_schedule"
 }
 
-# 5. 显示最终配置摘要
+setup_cron_job() {
+    log "配置 Cron 定时任务..."
+    local cron_schedule
+
+    if crontab -l 2>/dev/null | grep -q "$UPDATE_SCRIPT_PATH"; then
+        local overwrite
+        read -p "检测到已有自动更新任务，是否覆盖? [y/N]: " -r overwrite
+        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
+            log "保留现有 Cron 任务。" "warn"
+            return 0
+        fi
+    fi
+
+    cron_schedule=$(prompt_cron_schedule)
+    local tmp_cron
+    tmp_cron=$(mktemp)
+
+    crontab -l 2>/dev/null | grep -v "$UPDATE_SCRIPT_PATH" | grep -v "$CRON_JOB_COMMENT" >"$tmp_cron" || true
+    {
+        echo "$CRON_JOB_COMMENT"
+        echo "$cron_schedule $UPDATE_SCRIPT_PATH"
+    } >>"$tmp_cron"
+
+    if crontab "$tmp_cron"; then
+        log "Cron 定时任务配置完成。" "success"
+    else
+        log "导入 Cron 配置失败。" "error"
+        rm -f "$tmp_cron"
+        return 1
+    fi
+    rm -f "$tmp_cron"
+}
+
 show_summary() {
     echo
-    log "---------- 自动更新配置摘要 ----------" "info"
-    
+    log "---------- 自动更新配置摘要 ----------"
     if [[ -x "$UPDATE_SCRIPT_PATH" ]]; then
-        echo -e "  \033[0;32m✓\033[0m 更新脚本: 已创建 ($UPDATE_SCRIPT_PATH)"
+        echo -e "  \033[0;32m✓\033[0m 更新脚本: $UPDATE_SCRIPT_PATH"
     else
         echo -e "  \033[0;31m✗\033[0m 更新脚本: 未找到"
     fi
 
-    if systemctl is-active --quiet cron; then
+    if systemctl is-active --quiet "$CRON_SERVICE_NAME"; then
         echo -e "  \033[0;32m✓\033[0m Cron 服务: 运行中"
     else
         echo -e "  \033[0;31m✗\033[0m Cron 服务: 未运行"
     fi
-    
-    if crontab -l 2>/dev/null | grep -q "$UPDATE_SCRIPT_PATH"; then
-        local cron_line
-        cron_line=$(crontab -l | grep "$UPDATE_SCRIPT_PATH")
-        echo -e "  \033[0;32m✓\033[0m 定时任务: 已配置"
-        echo -e "    执行计划: $cron_line"
+
+    local cron_line
+    cron_line=$(crontab -l 2>/dev/null | grep "$UPDATE_SCRIPT_PATH" || true)
+    if [[ -n "$cron_line" ]]; then
+        echo -e "  \033[0;32m✓\033[0m 定时任务: 已配置 ($cron_line)"
     else
         echo -e "  \033[0;31m✗\033[0m 定时任务: 未配置"
     fi
 
     echo -e "  \033[0;36mⓘ\033[0m 日志文件: $LOG_FILE"
-    log "------------------------------------" "info"
     echo
-    log "常用管理命令:" "info"
+    log "常用命令:" "info"
     echo "  - 查看任务: crontab -l"
     echo "  - 编辑任务: crontab -e"
     echo "  - 手动执行: sudo $UPDATE_SCRIPT_PATH"
-    echo "  - 实时日志: tail -f $LOG_FILE"
+    echo "  - 查看日志: sudo tail -f $LOG_FILE"
     echo "  - 移除任务: (crontab -l | grep -v '$UPDATE_SCRIPT_PATH' | crontab -)"
     echo
 }
 
-# --- 主函数入口 ---
 main() {
-    # 捕获任何错误，并给出提示
-    trap 'log "脚本在中途发生错误，请检查上面的输出。" "error"' ERR
-
-    clear
-    echo "=========================================="
-    echo "  Debian 13 系统自动更新配置工具"
-    echo "=========================================="
-    echo
-    
-    ensure_root_privileges
+    trap 'log "脚本执行中发生错误，请检查输出与日志。" "error"' ERR
+    ensure_root
+    detect_debian_release
+    ensure_systemd
     ensure_cron_service
     create_update_script
     setup_cron_job
-    
     show_summary
-    
     log "所有配置已完成！" "success"
 }
 
-# --- 脚本执行 ---
 main "$@"
