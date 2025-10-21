@@ -108,9 +108,10 @@ EOF
 }
 
 install_snell() {
-  local arch="$1" temp_dir
+  local arch="$1"
+  local temp_dir=""
   temp_dir=$(mktemp -d)
-  trap 'rm -rf "$temp_dir"' EXIT
+  trap '[[ -n "${temp_dir:-}" ]] && rm -rf "${temp_dir:-}"' EXIT
 
   local url="https://dl.nssurge.com/snell/snell-server-${SNELL_VERSION}-linux-${arch}.zip"
   log_info "正在下载 Snell ${SNELL_VERSION} (${arch})..."
@@ -124,6 +125,9 @@ install_snell() {
 
   install -m 755 "${temp_dir}/snell-server" "${INSTALL_DIR}/snell-server"
   log_info "Snell 已安装到 ${INSTALL_DIR}/snell-server"
+
+  rm -rf "$temp_dir"
+  trap - EXIT
 }
 
 configure_systemd() {
