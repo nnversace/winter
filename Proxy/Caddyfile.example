@@ -1,0 +1,244 @@
+# ============================================
+# Caddy 反向代理配置示例
+# ============================================
+# 
+# 使用方法:
+# 1. 复制此文件到 /etc/caddy/Caddyfile
+#    sudo cp Caddyfile.example /etc/caddy/Caddyfile
+# 
+# 2. 根据需要选择并修改下面的配置
+# 
+# 3. 重载 Caddy 配置
+#    sudo systemctl reload caddy
+# ============================================
+
+# --------------------------------------------
+# 示例 1: HTTP 反向代理 (监听 80 端口)
+# --------------------------------------------
+# 适用场景: 内网环境、开发测试、无需域名
+# 
+# :80 {
+#     reverse_proxy localhost:4173
+#     
+#     log {
+#         output file /var/log/caddy/access.log
+#         format json
+#     }
+#     
+#     header {
+#         X-Content-Type-Options "nosniff"
+#         X-Frame-Options "SAMEORIGIN"
+#         -Server
+#     }
+# }
+
+# --------------------------------------------
+# 示例 2: HTTP 反向代理 (自定义端口)
+# --------------------------------------------
+# 适用场景: 避免端口冲突、内网多服务
+# 
+# :8080 {
+#     reverse_proxy localhost:4173
+#     
+#     log {
+#         output file /var/log/caddy/access.log
+#     }
+# }
+
+# --------------------------------------------
+# 示例 3: HTTPS 反向代理 (自动证书)
+# --------------------------------------------
+# 适用场景: 生产环境、公网访问、需要 SSL
+# 注意: 替换 example.com 为您的域名
+#       替换 admin@example.com 为您的邮箱
+# 
+# example.com {
+#     reverse_proxy localhost:4173
+#     
+#     log {
+#         output file /var/log/caddy/access.log
+#         format json
+#     }
+#     
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Content-Type-Options "nosniff"
+#         X-Frame-Options "SAMEORIGIN"
+#         X-XSS-Protection "1; mode=block"
+#         -Server
+#     }
+#     
+#     tls admin@example.com
+# }
+
+# --------------------------------------------
+# 示例 4: 多域名配置
+# --------------------------------------------
+# 适用场景: 一台服务器托管多个站点
+# 
+# site1.example.com {
+#     reverse_proxy localhost:4173
+#     tls admin@example.com
+# }
+# 
+# site2.example.com {
+#     reverse_proxy localhost:8080
+#     tls admin@example.com
+# }
+
+# --------------------------------------------
+# 示例 5: 负载均衡
+# --------------------------------------------
+# 适用场景: 高可用、多实例部署
+# 
+# example.com {
+#     reverse_proxy localhost:4173 localhost:4174 localhost:4175 {
+#         lb_policy round_robin
+#         health_uri /health
+#         health_interval 10s
+#     }
+# }
+
+# --------------------------------------------
+# 示例 6: 启用压缩和缓存
+# --------------------------------------------
+# 适用场景: 优化性能、减少带宽
+# 
+# example.com {
+#     encode gzip zstd
+#     
+#     reverse_proxy localhost:4173
+#     
+#     @static {
+#         path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg *.woff *.woff2
+#     }
+#     
+#     header @static Cache-Control "public, max-age=31536000"
+# }
+
+# --------------------------------------------
+# 示例 7: WebSocket 支持
+# --------------------------------------------
+# 适用场景: 实时应用、聊天应用
+# 注意: Caddy 默认支持 WebSocket，无需特殊配置
+# 
+# example.com {
+#     reverse_proxy localhost:4173
+# }
+
+# --------------------------------------------
+# 示例 8: 基本认证
+# --------------------------------------------
+# 适用场景: 简单的访问控制
+# 注意: 使用 `caddy hash-password` 生成密码哈希
+# 
+# :80 {
+#     basicauth {
+#         # 用户名: admin
+#         # 使用 `caddy hash-password` 生成下面的哈希值
+#         admin JDJhJDE0JFNvbWVSYW5kb21IYXNoSGVyZQ==
+#     }
+#     
+#     reverse_proxy localhost:4173
+# }
+
+# --------------------------------------------
+# 示例 9: IP 白名单
+# --------------------------------------------
+# 适用场景: 限制访问来源
+# 
+# :80 {
+#     @allowed {
+#         remote_ip 192.168.1.0/24 10.0.0.0/8
+#     }
+#     
+#     handle @allowed {
+#         reverse_proxy localhost:4173
+#     }
+#     
+#     handle {
+#         abort
+#     }
+# }
+
+# --------------------------------------------
+# 示例 10: 路径路由
+# --------------------------------------------
+# 适用场景: 不同路径转发到不同后端
+# 
+# example.com {
+#     handle /api/* {
+#         reverse_proxy localhost:8080
+#     }
+#     
+#     handle /admin/* {
+#         reverse_proxy localhost:9000
+#     }
+#     
+#     handle {
+#         reverse_proxy localhost:4173
+#     }
+# }
+
+# ============================================
+# 推荐的生产环境配置
+# ============================================
+# 
+# 将下面的配置取消注释并修改为您的实际信息
+# 
+# # 替换为您的域名
+# your-domain.com {
+#     # 启用压缩
+#     encode gzip zstd
+#     
+#     # 反向代理到 localhost:4173
+#     reverse_proxy localhost:4173 {
+#         # 健康检查 (可选)
+#         # health_uri /health
+#         # health_interval 10s
+#     }
+#     
+#     # 访问日志
+#     log {
+#         output file /var/log/caddy/access.log {
+#             roll_size 100mb
+#             roll_keep 10
+#             roll_keep_for 720h
+#         }
+#         format json
+#     }
+#     
+#     # 安全头
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Content-Type-Options "nosniff"
+#         X-Frame-Options "SAMEORIGIN"
+#         X-XSS-Protection "1; mode=block"
+#         Referrer-Policy "no-referrer-when-downgrade"
+#         Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+#         -Server
+#     }
+#     
+#     # TLS 配置
+#     tls your-email@example.com
+# }
+
+# ============================================
+# 快速开始 - HTTP 模式 (取消下面的注释)
+# ============================================
+
+:80 {
+    reverse_proxy localhost:4173
+    
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+    
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "no-referrer-when-downgrade"
+        -Server
+    }
+}
