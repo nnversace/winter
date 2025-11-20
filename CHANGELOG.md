@@ -1,5 +1,34 @@
 # 更新日志 (Changelog)
 
+## [2.1.0] - Debian 13 专属内核优化版
+
+### 重大更新 (Critical Updates)
+
+#### modules/kernel-optimize.sh - 完全重构 (第二次)
+- ✨ **参数精选**: 根据用户提供的参数完全重构，仅保留对 Debian 13 最有效的配置
+- ✨ **IPv6 支持**: 新增 IPv6 转发配置 (net.ipv6.conf.all.forwarding)
+- ✨ **文件句柄优化**: 提升至 6815744 (从 1048576)
+- ✨ **网络缓冲区调整**: 
+  - net.core.rmem_max = 16777216 (16MB)
+  - net.core.wmem_max = 16777216 (16MB)
+  - net.ipv4.tcp_rmem = 4096 87380 16777216
+  - net.ipv4.tcp_wmem = 4096 65536 16777216
+  - net.ipv4.udp_rmem_min = 8192
+  - net.ipv4.udp_wmem_min = 8192
+- ✨ **TCP 性能优化**: 
+  - tcp_no_metrics_save, tcp_sack, tcp_fack
+  - tcp_window_scaling, tcp_moderate_rcvbuf
+  - 禁用不必要的功能 (ECN, F-RTO, MTU probing)
+- ✨ **配置精简**: 移除 20+ 个对 Debian 13 不必要的参数
+- ✨ **版本检测**: 新增 detect_debian_version() 函数
+- ✨ **配置清理**: 新增 cleanup_old_sysctl() 避免冲突
+- ✨ **增强验证**: 分类显示配置状态 (文件系统/BBR/缓冲区/TCP/IP转发)
+- ✨ **优化建议**: 新增 show_recommendations() 提供详细的后续指导
+- 📝 **详细注释**: 每个参数都有中文注释说明作用
+
+### 新增文档
+- `KERNEL_OPTIMIZE_REFACTOR.md` - 详细的重构说明文档
+
 ## [2.0.0] - Debian 13 优化版
 
 ### 重大改进 (Major Improvements)
