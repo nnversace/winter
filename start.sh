@@ -25,7 +25,9 @@ declare -A MODULES=(
     ["system-optimize"]="系统优化 (Zram, 时区, 时间同步)"
     ["kernel-optimize"]="内核参数深度优化 (TCP BBR, 文件句柄等)"
     ["auto-update-setup"]="自动更新系统"
-    ["mosdns-x"]="MosDNS X DNS 加速配置"
+    ["mosdns-x"]="MosDNS X DNS 加速配置 (接管系统 DNS)"
+    ["snell-v5"]="Snell Server v5 代理服务"
+    ["sing-box"]="sing-box 代理服务 (VLESS+Reality)"
 )
 
 # 预定义的推荐执行顺序
@@ -34,6 +36,8 @@ readonly MASTER_ORDER_DEFAULT=(
     kernel-optimize
     auto-update-setup
     mosdns-x
+    snell-v5
+    sing-box
 )
 
 #--- 执行状态 ---

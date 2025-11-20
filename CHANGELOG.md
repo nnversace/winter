@@ -1,5 +1,56 @@
 # 更新日志 (Changelog)
 
+## [2.2.0] - 代理模块和 DNS 优化版
+
+### 新增模块 (New Modules)
+
+#### modules/snell-v5.sh - Snell Server v5 一键安装
+- ✨ **自动安装**: 自动下载并安装 Snell Server v5
+- ✨ **多架构支持**: amd64, arm64, armv7
+- ✨ **自动配置**: 自动生成 PSK 密钥和配置文件
+- ✨ **systemd 集成**: 完整的服务管理
+- ✨ **客户端配置**: 自动生成客户端配置和 URI
+- 🔧 **IPv6 支持**: 默认启用 IPv6
+- 🔧 **可选混淆**: 支持 TLS 混淆配置
+
+#### modules/sing-box.sh - sing-box (VLESS+Reality) 一键安装
+- ✨ **最新版本**: 自动获取并安装最新版 sing-box
+- ✨ **多架构支持**: amd64, arm64, armv7
+- ✨ **Reality 配置**: 预配置 VLESS+Reality 协议
+- ✨ **密钥生成**: 自动生成 UUID、公私钥对、Short ID
+- ✨ **systemd 集成**: 完整的服务管理
+- ✨ **配置验证**: 内置配置验证功能
+- 🔧 **强伪装**: 使用 www.apple.com 作为 SNI
+- 🔧 **流控**: xtls-rprx-vision 流控支持
+
+### 模块优化 (Module Enhancements)
+
+#### modules/mosdns-x.sh - DNS 优化和系统接管
+- ✨ **系统 DNS 接管**: 自动配置系统 DNS 为 127.0.0.1
+- ✨ **systemd-resolved 支持**: 智能检测并配置 systemd-resolved
+- ✨ **传统 resolv.conf 支持**: 兼容传统 DNS 配置方式
+- ✨ **自动备份**: 自动备份原始 DNS 配置
+- 🔧 **端口变更**: 监听端口从 5533 改为 53 (标准 DNS 端口)
+- 🔧 **上游服务器优化**: 
+  - 1.1.1.1 (Cloudflare)
+  - 8.8.8.8 (Google)
+  - tls://unfiltered.adguard-dns.com (AdGuard DNS over TLS)
+- 🔧 **immutable 保护**: 使用 chattr +i 防止配置被覆盖
+
+### start.sh 更新
+- ✨ 新增模块: snell-v5, sing-box
+- 🔧 更新 mosdns-x 描述: "MosDNS X DNS 加速配置 (接管系统 DNS)"
+- 🔧 更新推荐执行顺序
+
+### 新增文档
+- `NEW_MODULES_v2.2.md` - 新模块详细说明文档
+  - Snell v5 安装和配置指南
+  - sing-box 安装和配置指南
+  - MosDNS-X 新功能说明
+  - 快速开始指南
+  - 故障排除
+  - 卸载指南
+
 ## [2.1.0] - Debian 13 专属内核优化版
 
 ### 重大更新 (Critical Updates)

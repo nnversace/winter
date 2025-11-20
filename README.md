@@ -35,11 +35,12 @@
 - Chrony 时间同步配置
 - Debian 13 特定优化
 
-#### 2. kernel-optimize.sh - 内核优化
+#### 2. kernel-optimize.sh - 内核优化 (v2.1.0)
 - ✨ **完全重写**: 从旧式脚本升级为现代化模块
 - TCP BBR 拥塞控制算法
-- 系统资源限制优化 (文件句柄、进程数)
+- 系统资源限制优化 (文件句柄 6815744、进程数)
 - 网络参数调优 (TCP/UDP 缓冲区、连接队列)
+- IPv6 转发支持
 - PAM limits 配置
 - 配置验证和状态显示
 - 完善的错误处理和备份机制
@@ -48,6 +49,30 @@
 - Cron 定时任务配置
 - APT 锁检测和等待机制
 - 磁盘空间检查
+
+#### 4. mosdns-x.sh - DNS 加速 (v2.2.0)
+- ✨ **系统 DNS 接管**: 自动配置系统使用本地 DNS
+- MosDNS-X 自动安装和配置
+- 监听端口 53 (标准 DNS 端口)
+- 上游 DNS: Cloudflare, Google, AdGuard DNS over TLS
+- systemd-resolved 和传统 resolv.conf 兼容
+- DNS 配置自动备份
+
+#### 5. snell-v5.sh - Snell 代理 (v2.2.0 新增)
+- ✨ **Snell Server v5**: 轻量级代理服务
+- 自动下载和安装 (支持多架构)
+- 自动生成 PSK 密钥
+- 客户端配置自动生成
+- IPv6 支持
+- 可选 TLS 混淆
+
+#### 6. sing-box.sh - 通用代理 (v2.2.0 新增)
+- ✨ **VLESS+Reality**: 强伪装能力的代理协议
+- 自动下载最新版 sing-box
+- 自动生成密钥对和配置
+- Reality TLS 伪装 (www.apple.com)
+- xtls-rprx-vision 流控
+- 配置验证功能
 - 内核更新自动重启
 - 进程锁防止重复运行
 - 详细的日志记录
