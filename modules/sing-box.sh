@@ -6,7 +6,7 @@
 # 功能:
 #   - 自动下载并安装最新版 sing-box
 #   - 配置 systemd 服务
-#   - 生成基础配置文件 (VLESS+Reality)
+#   - 生成基础配置文件 (Shadowsocks 2022)
 #   - 支持多架构 (amd64, arm64, armv7)
 #
 # 适用系统: Debian 12/13+, Ubuntu 20+
@@ -19,6 +19,8 @@ readonly INSTALL_PATH="/usr/local/bin"
 readonly CONFIG_PATH="/etc/sing-box"
 readonly SERVICE_PATH="/etc/systemd/system/sing-box.service"
 readonly TMP_DIR=$(mktemp -d)
+readonly DEFAULT_PORT="59271"
+readonly DEFAULT_PASSWORD="IUmuU/NjIQhHPMdBz5WONA=="
 
 #--- 颜色定义 ---
 readonly RED='\033[0;31m'
@@ -190,27 +192,9 @@ create_config() {
     echo_info "创建配置文件..."
     mkdir -p "$CONFIG_PATH"
     
-    local port
-    read -p "请输入监听端口 [默认: 443]: " port
-    port=${port:-443}
-    
-    # 验证端口号
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-        echo_warn "无效的端口号，使用默认端口: 443"
-        port=443
-    fi
-    
-    local uuid
-    uuid=$(generate_uuid)
-    
-    local private_key
-    private_key=$(generate_private_key)
-    
-    local public_key
-    public_key=$(generate_public_key "$private_key")
-    
-    local short_id
-    short_id=$(generate_short_id)
+    # 使用默认配置
+    local port="${DEFAULT_PORT}"
+    local password="${DEFAULT_PASSWORD}"
     
     # 创建配置文件
     cat > "${CONFIG_PATH}/config.json" << EOF
@@ -221,37 +205,15 @@ create_config() {
   },
   "inbounds": [
     {
-      "type": "vless",
-      "tag": "vless-in",
+      "type": "shadowsocks",
+      "tag": "DIRECT",
       "listen": "::",
-      "listen_fields": {
-        "tcp_fast_open": true,
-        "tcp_multi_path": false
-      },
-      "sniff": true,
-      "sniff_override_destination": false,
-      "domain_strategy": "prefer_ipv4",
-      "port": ${port},
-      "users": [
-        {
-          "uuid": "${uuid}",
-          "flow": "xtls-rprx-vision"
-        }
-      ],
-      "tls": {
+      "listen_port": ${port},
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "${password}",
+      "multiplex": {
         "enabled": true,
-        "server_name": "www.apple.com",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "www.apple.com",
-            "server_port": 443
-          },
-          "private_key": "${private_key}",
-          "short_id": [
-            "${short_id}"
-          ]
-        }
+        "padding": true
       }
     }
   ],
@@ -276,48 +238,37 @@ EOF
     
     echo
     echo "================================================================================"
-    echo "                    sing-box VLESS+Reality 配置信息"
+    echo "                    sing-box Shadowsocks 2022 配置信息"
     echo "================================================================================"
     echo "服务器地址:   ${server_ip}"
     echo "端口:         ${port}"
-    echo "UUID:         ${uuid}"
-    echo "Flow:         xtls-rprx-vision"
-    echo "Public Key:   ${public_key}"
-    echo "Short ID:     ${short_id}"
-    echo "Server Name:  www.apple.com"
+    echo "密码:         ${password}"
+    echo "加密方式:     2022-blake3-aes-128-gcm"
+    echo "多路复用:     启用"
     echo
-    echo "客户端配置示例 (v2rayN/Shadowrocket):"
+    echo "客户端配置示例:"
     echo "--------------------------------"
-    echo "协议:         VLESS"
+    echo "协议:         Shadowsocks 2022"
     echo "地址:         ${server_ip}"
     echo "端口:         ${port}"
-    echo "UUID:         ${uuid}"
-    echo "Flow:         xtls-rprx-vision"
-    echo "传输协议:     TCP"
-    echo "TLS:          Reality"
-    echo "SNI:          www.apple.com"
-    echo "PublicKey:    ${public_key}"
-    echo "ShortID:      ${short_id}"
+    echo "密码:         ${password}"
+    echo "加密方式:     2022-blake3-aes-128-gcm"
     echo "================================================================================"
     echo
     
     # 保存配置信息到文件
     cat > "${CONFIG_PATH}/client-config.txt" << EOF
-sing-box VLESS+Reality 客户端配置信息
-=====================================
+sing-box Shadowsocks 2022 客户端配置信息
+========================================
 
 服务器地址: ${server_ip}
 端口: ${port}
-UUID: ${uuid}
-Flow: xtls-rprx-vision
-传输协议: TCP
-TLS: Reality
-SNI: www.apple.com
-PublicKey: ${public_key}
-ShortID: ${short_id}
+密码: ${password}
+加密方式: 2022-blake3-aes-128-gcm
+多路复用: 启用
 
-配置 URI (部分客户端支持):
-vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.apple.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#sing-box-reality
+配置 URI:
+ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206${password}@${server_ip}:${port}#sing-box-ss2022
 EOF
     
     echo_info "配置信息已保存到: ${CONFIG_PATH}/client-config.txt"

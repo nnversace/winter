@@ -1,5 +1,31 @@
 # 更新日志 (Changelog)
 
+## [2.2.1] - 配置简化版
+
+### 模块更新 (Module Updates)
+
+#### modules/snell-v5.sh - 配置简化
+- 🔧 **版本升级**: v5.0.0 → v5.0.1
+- 🔧 **端口变更**: 6160 → 53100
+- 🔧 **固定 PSK**: 使用固定密码 `IUmuU/NjIQhHPMdBz5WONA==`
+- 🔧 **自动化配置**: 移除交互式配置，直接使用默认值
+- 🔧 **简化配置文件**: 仅保留必要参数
+
+#### modules/sing-box.sh - 协议变更
+- 🔧 **协议变更**: VLESS+Reality → Shadowsocks 2022
+- 🔧 **端口变更**: 443 → 59271
+- 🔧 **加密方式**: 2022-blake3-aes-128-gcm
+- 🔧 **固定密码**: `IUmuU/NjIQhHPMdBz5WONA==`
+- 🔧 **多路复用**: 启用 multiplex 和 padding
+- 🔧 **自动化配置**: 移除交互式配置，直接使用默认值
+
+#### start.sh - 模块描述更新
+- 🔧 更新 snell-v5 描述: "Snell Server v5.0.1 代理服务 (端口: 53100)"
+- 🔧 更新 sing-box 描述: "sing-box 代理服务 (Shadowsocks 2022)"
+
+### 新增文档
+- `UPDATE_v2.2.1.md` - 详细的更新说明和配置对比
+
 ## [2.2.0] - 代理模块和 DNS 优化版
 
 ### 新增模块 (New Modules)

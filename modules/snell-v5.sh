@@ -18,8 +18,9 @@ set -euo pipefail
 readonly INSTALL_PATH="/usr/local/bin"
 readonly CONFIG_PATH="/etc/snell"
 readonly SERVICE_PATH="/etc/systemd/system/snell.service"
-readonly SNELL_VERSION="${SNELL_VERSION:-5.0.0}"
-readonly DEFAULT_PORT="6160"
+readonly SNELL_VERSION="${SNELL_VERSION:-5.0.1}"
+readonly DEFAULT_PORT="53100"
+readonly DEFAULT_PSK="IUmuU/NjIQhHPMdBz5WONA=="
 
 #--- 颜色定义 ---
 readonly RED='\033[0;31m'
@@ -152,30 +153,14 @@ create_config() {
     echo_info "创建配置文件..."
     mkdir -p "$CONFIG_PATH"
     
-    local psk
-    psk=$(generate_psk)
-    
-    local port
-    read -p "请输入监听端口 [默认: ${DEFAULT_PORT}]: " port
-    port=${port:-$DEFAULT_PORT}
-    
-    # 验证端口号
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-        echo_warn "无效的端口号，使用默认端口: ${DEFAULT_PORT}"
-        port=$DEFAULT_PORT
-    fi
+    # 使用默认配置
+    local port="${DEFAULT_PORT}"
+    local psk="${DEFAULT_PSK}"
     
     cat > "${CONFIG_PATH}/snell-server.conf" << EOF
 [snell-server]
-# Snell Server v5 配置文件
 listen = 0.0.0.0:${port}
 psk = ${psk}
-ipv6 = true
-dns = 8.8.8.8, 1.1.1.1
-
-# Obfs 混淆 (可选，取消注释启用)
-# obfs = tls
-# obfs-host = www.bing.com
 EOF
     
     echo_success "配置文件创建成功: ${CONFIG_PATH}/snell-server.conf"

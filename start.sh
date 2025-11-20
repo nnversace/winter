@@ -26,8 +26,8 @@ declare -A MODULES=(
     ["kernel-optimize"]="内核参数深度优化 (TCP BBR, 文件句柄等)"
     ["auto-update-setup"]="自动更新系统"
     ["mosdns-x"]="MosDNS X DNS 加速配置 (接管系统 DNS)"
-    ["snell-v5"]="Snell Server v5 代理服务"
-    ["sing-box"]="sing-box 代理服务 (VLESS+Reality)"
+    ["snell-v5"]="Snell Server v5.0.1 代理服务 (端口: 53100)"
+    ["sing-box"]="sing-box 代理服务 (Shadowsocks 2022)"
 )
 
 # 预定义的推荐执行顺序
