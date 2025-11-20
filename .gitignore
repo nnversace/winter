@@ -1,0 +1,71 @@
+# Logs
+*.log
+/var/log/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-*
+.project
+.settings/
+
+# Deployment and runtime
+deployment_summary*.txt
+/tmp/
+*.pid
+*.lock
+
+# Sensitive data
+*.key
+*.pem
+*.crt
+.env.local
+.env.*.local
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Node modules (if used)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Python (if used)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+ENV/
+
+# Docker (if used)
+.dockerignore
+
+# Build outputs
+dist/
+build/
+*.o
+*.so
+*.exe

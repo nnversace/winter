@@ -1,6 +1,10 @@
 #!/bin/bash
-# 全自动系统优化脚本
+
+#================================================================================
+# 全自动系统优化脚本 (Debian 13 优化版)
 # 功能: 智能Zram配置、时区设置、时间同步
+# 适用系统: Debian 12/13+
+#================================================================================
 
 set -euo pipefail
 
@@ -9,6 +13,7 @@ readonly CUSTOM_ZRAM_SCRIPT="/usr/local/sbin/custom-zram-setup.sh"
 readonly SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/zramswap.service.d"
 readonly SYSTEMD_OVERRIDE_FILE="${SYSTEMD_OVERRIDE_DIR}/override.conf"
 readonly DEFAULT_TIMEZONE="Asia/Shanghai"
+readonly DEBIAN_VERSION=$(cat /etc/debian_version 2>/dev/null || echo "unknown")
 
 # === 日志函数 ===
 log() {
@@ -421,6 +426,10 @@ setup_chrony() {
 main() {
     [[ $EUID -eq 0 ]] || { log "需要root权限运行" "error"; exit 1; }
     
+    if [[ "$DEBIAN_VERSION" =~ trixie|sid ]]; then
+        log "检测到 Debian 13+ ($DEBIAN_VERSION)，使用优化配置。" "info"
+    fi
+    
     local wait_count=0
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
         ((wait_count++))
@@ -439,12 +448,12 @@ main() {
     
     if ! command -v bc &>/dev/null; then
         log "安装必需的依赖: bc" "info"
-        apt-get install -y bc >/dev/null 2>&1 || log "bc安装失败，将使用备用计算方法" "warn"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y bc >/dev/null 2>&1 || log "bc安装失败，将使用备用计算方法" "warn"
     fi
     
     export SYSTEMD_PAGER="" PAGER=""
     
-    log "🔧 开始全自动系统优化..." "info"
+    log "🔧 开始全自动系统优化 (Debian 13 优化版)..." "info"
     
     echo
     setup_zram || log "Zram配置出现问题，请检查日志" "warn"
