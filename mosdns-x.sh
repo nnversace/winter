@@ -34,11 +34,11 @@ DEBIAN_VERSION=""
 # --- 函数定义 ---
 
 log_info() {
-    echo -e "\033[0;32m[INFO]\033[0m $1"
+    echo -e "\033[0;32m[INFO]\033[0m $1" >&2
 }
 
 log_warn() {
-    echo -e "\033[0;33m[WARN]\033[0m $1"
+    echo -e "\033[0;33m[WARN]\033[0m $1" >&2
 }
 
 log_error() {
@@ -46,7 +46,7 @@ log_error() {
 }
 
 log_success() {
-    echo -e "\033[0;32m[SUCCESS]\033[0m $1"
+    echo -e "\033[0;32m[SUCCESS]\033[0m $1" >&2
 }
 
 cleanup() {
@@ -121,36 +121,43 @@ detect_arch() {
     arch=$(uname -m)
     case "$arch" in
         x86_64|amd64)
-            echo "linux-amd64"
+            printf '%s' "linux-amd64"
             ;;
         aarch64|arm64)
-            echo "linux-arm64"
+            printf '%s' "linux-arm64"
             ;;
         *)
-            log_error "不支持的架构: $arch"
-            exit 1
+            log_error "不支持的架构: $arch" >&2
+            return 1
             ;;
     esac
 }
 
 get_latest_release() {
-    log_info "正在获取 mosdns-x 最新版本信息..."
+    log_info "正在获取 mosdns-x 最新版本信息..." >&2
     local api_url="https://api.github.com/repos/pmkol/mosdns-x/releases/latest"
     
     local arch
     arch=$(detect_arch)
     
+    # Fetch API response once
+    local api_response
+    api_response=$(curl -fsSL "$api_url" 2>/dev/null) || {
+        log_error "无法访问 GitHub API，请检查网络连接。" >&2
+        return 1
+    }
+    
     local download_url version
-    download_url=$(curl -fsSL "$api_url" 2>/dev/null | grep "browser_download_url.*${arch}.zip" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1)
-    version=$(curl -fsSL "$api_url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/' | head -n1)
+    download_url=$(echo "$api_response" | grep "browser_download_url.*${arch}.zip" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1)
+    version=$(echo "$api_response" | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/' | head -n1)
     
     if [[ -z "$download_url" ]]; then
-        log_error "无法获取 mosdns-x 下载链接。请检查网络或访问 https://github.com/pmkol/mosdns-x/releases"
-        exit 1
+        log_error "无法获取 mosdns-x 下载链接。请检查网络或访问 https://github.com/pmkol/mosdns-x/releases" >&2
+        return 1
     fi
     
-    log_info "成功获取下载链接 (版本 ${version:-latest}): $download_url"
-    echo "$download_url"
+    log_info "成功获取下载链接 (版本 ${version:-latest}): $download_url" >&2
+    printf '%s' "$download_url"
 }
 
 download_and_install() {
@@ -167,7 +174,7 @@ download_and_install() {
     log_info "正在下载 mosdns-x..."
     log_info "下载地址: $download_url"
     
-    if ! curl -fL --connect-timeout 15 --retry 3 --progress-bar "$download_url" -o "$TMP_DIR/mosdns.zip" 2>&1; then
+    if ! curl -fL --connect-timeout 15 --retry 3 -o "$TMP_DIR/mosdns.zip" "$download_url"; then
         log_error "下载失败，请检查网络连接。"
         log_error "下载URL: $download_url"
         exit 1
@@ -362,13 +369,16 @@ main() {
     detect_system
     install_dependencies
     
-    # Get download URL (captures only the URL from echo)
+    # Get download URL
     local download_url
-    download_url=$(get_latest_release)
+    if ! download_url=$(get_latest_release); then
+        log_error "无法获取下载链接。"
+        exit 1
+    fi
     
     # Validate URL was captured correctly
-    if [[ -z "$download_url" ]]; then
-        log_error "无法获取下载链接。"
+    if [[ -z "$download_url" ]] || [[ ! "$download_url" =~ ^https?:// ]]; then
+        log_error "获取到无效的下载链接: $download_url"
         exit 1
     fi
     
