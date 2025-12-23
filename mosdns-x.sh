@@ -149,24 +149,39 @@ get_latest_release() {
         exit 1
     fi
     
-    log_info "成功获取下载链接 (版本 ${version:-latest})"
+    log_info "成功获取下载链接 (版本 ${version:-latest}): $download_url"
     echo "$download_url"
 }
 
 download_and_install() {
     local download_url="$1"
     
+    # Validate URL
+    if [[ ! "$download_url" =~ ^https?:// ]]; then
+        log_error "无效的下载链接: $download_url"
+        exit 1
+    fi
+    
     TMP_DIR=$(mktemp -d /tmp/mosdns-x-install.XXXXXX)
     
     log_info "正在下载 mosdns-x..."
-    if ! curl -fL --connect-timeout 15 --retry 3 "$download_url" -o "$TMP_DIR/mosdns.zip"; then
+    log_info "下载地址: $download_url"
+    
+    if ! curl -fL --connect-timeout 15 --retry 3 --progress-bar "$download_url" -o "$TMP_DIR/mosdns.zip" 2>&1; then
         log_error "下载失败，请检查网络连接。"
+        log_error "下载URL: $download_url"
+        exit 1
+    fi
+    
+    # Verify download
+    if [[ ! -f "$TMP_DIR/mosdns.zip" ]] || [[ ! -s "$TMP_DIR/mosdns.zip" ]]; then
+        log_error "下载的文件为空或不存在。"
         exit 1
     fi
     
     log_info "正在解压文件..."
-    if ! unzip -qo "$TMP_DIR/mosdns.zip" -d "$TMP_DIR"; then
-        log_error "解压失败。"
+    if ! unzip -qo "$TMP_DIR/mosdns.zip" -d "$TMP_DIR" 2>/dev/null; then
+        log_error "解压失败，文件可能已损坏。"
         exit 1
     fi
     
@@ -347,8 +362,15 @@ main() {
     detect_system
     install_dependencies
     
+    # Get download URL (captures only the URL from echo)
     local download_url
     download_url=$(get_latest_release)
+    
+    # Validate URL was captured correctly
+    if [[ -z "$download_url" ]]; then
+        log_error "无法获取下载链接。"
+        exit 1
+    fi
     
     download_and_install "$download_url"
     create_config_file
