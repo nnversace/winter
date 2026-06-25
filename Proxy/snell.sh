@@ -1,28 +1,30 @@
 #!/bin/bash
 
 #================================================================================
-# Snell v5 一键安装脚本 (默认适用于 Debian/Ubuntu 系列)
+# Snell 一键安装脚本 (默认适用于 Debian/Ubuntu 系列)
 #
 # 功能概述:
-#   - 自动检测系统架构并下载对应的 Snell v5 二进制文件
-#   - 支持通过环境变量自定义 PSK、端口和 Snell 版本
+#   - 自动检测系统架构并下载对应的 Snell 二进制文件
+#   - 支持交互式选择版本，或通过环境变量自定义 PSK、端口和 Snell 版本
 #   - 自动创建配置文件与 systemd 服务，实现开机自启
 #   - 提供详尽的日志输出，出现错误时自动清理临时文件
 #
 # 默认参数(可通过环境变量覆盖):
 #   PSK  : IUmuU/NjIQhHPMdBz5WONA==
 #   PORT : 53100
-#   SNELL_VERSION : 5.0.0
+#   SNELL_VERSION : 5.0.1 (可选 6.0.0b4 / v6-beta4)
 #
 # 使用示例:
-#   sudo PSK="your_psk" PORT=12345 ./snell-v5-install.sh
+#   sudo PSK="your_psk" PORT=12345 ./snell.sh
 #================================================================================
 
 set -euo pipefail
 
 readonly DEFAULT_PSK="IUmuU/NjIQhHPMdBz5WONA=="
 readonly DEFAULT_PORT="53100"
-readonly DEFAULT_VERSION="5.0.0"
+readonly DEFAULT_VERSION="5.0.1"
+readonly SNELL_V6_BETA4_VERSION="6.0.0b4"
+readonly VERSION_FALLBACKS=("5.0.1" "5.0.0" "4.1.1")
 readonly INSTALL_PATH="/usr/local/bin"
 readonly CONFIG_DIR="/etc/snell"
 readonly SERVICE_FILE="/etc/systemd/system/snell.service"
@@ -115,6 +117,9 @@ detect_arch() {
         aarch64|arm64)
             echo "linux-aarch64"
             ;;
+        i386|i686|x86)
+            echo "linux-i386"
+            ;;
         armv7l|armv7)
             echo "linux-armv7l"
             ;;
@@ -133,6 +138,9 @@ resolve_platform_candidates() {
             ;;
         linux-aarch64)
             echo "linux-aarch64 linux-arm64"
+            ;;
+        linux-i386)
+            echo "linux-i386 linux-386"
             ;;
         *)
             echo "$platform"
@@ -254,7 +262,7 @@ setup_service() {
     log_info "正在创建 systemd 服务文件: $SERVICE_FILE"
     cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
-Description=Snell v5 Server
+Description=Snell Server
 After=network.target
 Wants=network-online.target
 
@@ -305,13 +313,109 @@ Snell v${version} 安装完成！
 SUMMARY
 }
 
+print_usage() {
+    cat <<USAGE
+用法:
+  sudo ./snell.sh [--version <版本>] [--help]
+
+可选版本:
+  1) Snell v5 稳定版: ${DEFAULT_VERSION}
+  2) Snell v6 Beta 4 Updates: ${SNELL_V6_BETA4_VERSION}
+
+环境变量:
+  PSK=<预共享密钥> PORT=<端口> SNELL_VERSION=<版本或别名>
+
+版本别名:
+  stable/latest/v5 -> ${DEFAULT_VERSION}
+  v6/v6-beta4/beta4 -> ${SNELL_V6_BETA4_VERSION}
+USAGE
+}
+
+normalize_version() {
+    local version="$1"
+    case "$version" in
+        stable|latest|v5|5)
+            echo "$DEFAULT_VERSION"
+            ;;
+        v6|6|v6-beta4|v6-b4|beta4|b4|6-beta4|6b4|6.0.0-beta4)
+            echo "$SNELL_V6_BETA4_VERSION"
+            ;;
+        v*)
+            echo "${version#v}"
+            ;;
+        *)
+            echo "$version"
+            ;;
+    esac
+}
+
+select_version() {
+    local provided_version="${1:-}"
+    if [[ -n "$provided_version" ]]; then
+        normalize_version "$provided_version"
+        return
+    fi
+
+    if [[ ! -t 0 ]]; then
+        echo "$DEFAULT_VERSION"
+        return
+    fi
+
+    echo "请选择要安装的 Snell 版本:" >&2
+    echo "  1) Snell v5 稳定版 (${DEFAULT_VERSION}) [默认]" >&2
+    echo "  2) Snell v6 Beta 4 Updates (${SNELL_V6_BETA4_VERSION})" >&2
+    echo "  3) 自定义版本" >&2
+    read -r -p "请输入选项 [1-3]: " choice
+
+    case "${choice:-1}" in
+        1) echo "$DEFAULT_VERSION" ;;
+        2) echo "$SNELL_V6_BETA4_VERSION" ;;
+        3)
+            read -r -p "请输入 Snell 版本号或别名: " custom_version
+            normalize_version "$custom_version"
+            ;;
+        *)
+            log_warn "无效选项，使用默认版本 ${DEFAULT_VERSION}。"
+            echo "$DEFAULT_VERSION"
+            ;;
+    esac
+}
+
+parse_args() {
+    CLI_VERSION=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --version|-v)
+                if [[ $# -lt 2 ]]; then
+                    log_error "--version 需要提供版本号。"
+                    exit 1
+                fi
+                CLI_VERSION="$2"
+                shift 2
+                ;;
+            --help|-h)
+                print_usage
+                exit 0
+                ;;
+            *)
+                log_error "未知参数: $1"
+                print_usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
 main() {
+    parse_args "$@"
     require_root
     ensure_dependencies
 
     local psk="${PSK:-$DEFAULT_PSK}"
     local port="${PORT:-$DEFAULT_PORT}"
-    local version="${SNELL_VERSION:-$DEFAULT_VERSION}"
+    local requested_version="${CLI_VERSION:-${SNELL_VERSION:-}}"
+    local version
+    version=$(select_version "$requested_version")
 
     validate_psk "$psk"
     validate_port "$port"
